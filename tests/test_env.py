@@ -18,7 +18,7 @@ def test_port_success_when_slow_and_aligned():
     )
     assert docking_success(state, cfg)
     env.reset(seed=0, options={"state": state})
-    _, _, terminated, truncated, info = env.step(np.array([ -1.0, 0.0], dtype=np.float32))
+    _, _, terminated, truncated, info = env.step(np.zeros(3, dtype=np.float32))
     assert terminated
     assert not truncated
     assert info["success"]
@@ -40,7 +40,7 @@ def test_hull_collision_is_crash():
     )
     assert hits_hull(state, cfg)
     env.reset(seed=0, options={"state": state})
-    _, _, terminated, _, info = env.step(np.zeros(2, dtype=np.float32))
+    _, _, terminated, _, info = env.step(np.zeros(3, dtype=np.float32))
     assert terminated
     assert info["crash"]
     assert not info["success"]

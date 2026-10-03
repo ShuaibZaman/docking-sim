@@ -43,6 +43,8 @@ function formatRunLabel(run: RunSummary): string {
   let name = slug.replace(/_/g, " ");
   if (slug.includes("static")) name = "Static MLP";
   else if (slug.includes("smoke")) name = "Smoke MLP";
+  else if (slug.includes("wide")) name = "Wide MLP";
+  else if (slug.includes("deep")) name = "Deep MLP";
   return `${name} · ${steps}`;
 }
 
@@ -270,15 +272,22 @@ function Inspector({
           <span className="v">{frame.fuel.toFixed(1)}</span>
         </div>
         <div className="stat">
-          <span className="k">Thrust</span>
-          <span className="v">{frame.thrust.toFixed(2)}</span>
+          <span className="k">Axial</span>
+          <span className="v">{frame.axial.toFixed(2)}</span>
         </div>
         <div className="stat">
-          <span className="k">Torque</span>
-          <span className="v">{frame.torque.toFixed(2)}</span>
+          <span className="k">Lateral</span>
+          <span className="v">{frame.lateral.toFixed(2)}</span>
+        </div>
+        <div className="stat">
+          <span className="k">Yaw</span>
+          <span className="v">{frame.yaw.toFixed(2)}</span>
         </div>
       </div>
-      <p className="note">Thrust points along the nose. Torque spins the ship.</p>
+      <p className="note">
+        Axial burns along the nose. Positive is forward, negative is the brake. Lateral strafes sideways. Yaw
+        spins the ship.
+      </p>
     </>
   );
 }

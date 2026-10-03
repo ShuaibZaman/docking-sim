@@ -58,7 +58,7 @@ class DockingEnv(gym.Env):
         )
         self._reward_fn = make_reward(reward_name, reward_weights)
 
-        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
+        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)
         self.observation_space = spaces.Box(low=OBS_LOW, high=OBS_HIGH, dtype=np.float32)
 
         self._state = self._default_state()
@@ -129,8 +129,9 @@ class DockingEnv(gym.Env):
         crash: bool = False,
         timeout: bool = False,
         fuel_used: float = 0.0,
-        thrust: float = 0.0,
-        torque: float = 0.0,
+        axial: float = 0.0,
+        lateral: float = 0.0,
+        yaw: float = 0.0,
     ) -> dict[str, Any]:
         metrics = self._metrics(state)
         return {
@@ -139,8 +140,11 @@ class DockingEnv(gym.Env):
             "crash": bool(crash),
             "timeout": bool(timeout),
             "fuel_used": float(fuel_used),
-            "thrust": float(thrust),
-            "torque": float(torque),
+            "axial": float(axial),
+            "lateral": float(lateral),
+            "yaw": float(yaw),
+            "thrust": float(axial),
+            "torque": float(yaw),
             "x": float(state.x),
             "y": float(state.y),
             "vx": float(state.vx),
@@ -163,10 +167,11 @@ class DockingEnv(gym.Env):
 
     def step(self, action: np.ndarray) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
         action = np.asarray(action, dtype=np.float32).reshape(-1)
-        thrust = float(np.clip(action[0], -1.0, 1.0) + 1.0) * 0.5
-        torque = float(np.clip(action[1], -1.0, 1.0))
+        axial = float(np.clip(action[0], -1.0, 1.0))
+        lateral = float(np.clip(action[1], -1.0, 1.0))
+        yaw = float(np.clip(action[2], -1.0, 1.0))
 
-        self._state, fuel_used = step_ship(self._state, thrust, torque, self.cfg)
+        self._state, fuel_used = step_ship(self._state, axial, lateral, yaw, self.cfg)
         self._step_count += 1
 
         success = docking_success(self._state, self.cfg)
@@ -194,8 +199,9 @@ class DockingEnv(gym.Env):
             crash=crash,
             timeout=timeout,
             fuel_used=fuel_used,
-            thrust=thrust,
-            torque=torque,
+            axial=axial,
+            lateral=lateral,
+            yaw=yaw,
         )
         return self._observe(self._state), float(reward), terminated, truncated, info
 

@@ -1,0 +1,39 @@
+env:
+  max_steps: 800
+  dt: 0.05
+  dock_speed_max: 0.35
+  dock_angle_max_deg: 12
+  fuel_capacity: 100
+  randomize_start: false
+  randomize_velocity: false
+  reward: safe_docking
+  weights:
+    distance: 1.0
+    velocity: 0.4
+    rotation: 0.35
+    fuel: 0.02
+    time: 0.01
+    success: 120
+    crash: 80
+    close_range: 4.0
+
+algo:
+  name: ppo
+  policy: MlpPolicy
+  net_arch: [64, 64, 64]
+  learning_rate: 0.0003
+  n_steps: 2048
+  batch_size: 64
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.01
+  vf_coef: 0.5
+  normalize_obs: true
+
+train:
+  total_timesteps: 4096
+  checkpoint_every: 2048
+  seed: 42
+  device: auto

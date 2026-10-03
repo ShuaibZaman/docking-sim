@@ -41,6 +41,9 @@ export type Frame = {
   heading_error: number;
   thrust: number;
   torque: number;
+  axial: number;
+  lateral: number;
+  yaw: number;
   reward: number;
   reward_total: number;
   components: RewardComponents;

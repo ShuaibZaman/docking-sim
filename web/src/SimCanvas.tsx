@@ -111,6 +111,29 @@ function drawArrow(
   ctx.fill();
 }
 
+function drawPlume(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  angle: number,
+  strength: number,
+  radius: number,
+) {
+  if (strength < 0.05) return;
+  const mag = Math.min(1, strength);
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(angle);
+  ctx.fillStyle = `rgba(255, 140, 70, ${0.35 + mag * 0.5})`;
+  ctx.beginPath();
+  ctx.moveTo(-radius * 0.2, 0);
+  ctx.lineTo(-radius * (1.6 + mag), radius * 0.45);
+  ctx.lineTo(-radius * (1.6 + mag), -radius * 0.45);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
 function drawLegend(ctx: CanvasRenderingContext2D) {
   const items: Array<[string, string, "box" | "line"]> = [
     ["#f3f1ea", "Ship", "box"],
@@ -276,19 +299,12 @@ export function SimCanvas({ world, frames, index, selection, onSelect }: Props) 
       );
       ctx.stroke();
 
-      if (frame.thrust > 0.05) {
-        ctx.save();
-        ctx.translate(x, y);
-        ctx.rotate(heading);
-        ctx.fillStyle = `rgba(255, 140, 70, ${0.35 + frame.thrust * 0.5})`;
-        ctx.beginPath();
-        ctx.moveTo(-radius * 0.2, 0);
-        ctx.lineTo(-radius * (1.6 + frame.thrust), radius * 0.45);
-        ctx.lineTo(-radius * (1.6 + frame.thrust), -radius * 0.45);
-        ctx.closePath();
-        ctx.fill();
-        ctx.restore();
-      }
+      const axial = frame.axial ?? frame.thrust;
+      const lateral = frame.lateral ?? 0;
+      drawPlume(ctx, x, y, heading, axial, radius);
+      drawPlume(ctx, x, y, heading + Math.PI, -axial, radius);
+      drawPlume(ctx, x, y, heading - Math.PI / 2, lateral, radius);
+      drawPlume(ctx, x, y, heading + Math.PI / 2, -lateral, radius);
 
       ctx.save();
       ctx.translate(x, y);

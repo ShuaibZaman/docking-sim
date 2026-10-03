@@ -75,6 +75,27 @@ def _vecnormalize_for_checkpoint(run_dir: Path, checkpoint_id: str) -> Path | No
     return None
 
 
+def policy_action_to_commands(action: np.ndarray) -> np.ndarray:
+    """Map a policy action onto axial, lateral, yaw in [-1, 1].
+
+    Two-action checkpoints were trained with forward-only thrust: action[0] in
+    [-1, 1] becomes axial in [0, 1], and action[1] is yaw. Lateral stays off.
+    """
+    values = np.asarray(action, dtype=np.float32).reshape(-1)
+    if values.shape[0] == 2:
+        axial = float(np.clip(values[0], -1.0, 1.0) + 1.0) * 0.5
+        yaw = float(np.clip(values[1], -1.0, 1.0))
+        return np.array([axial, 0.0, yaw], dtype=np.float32)
+    return np.array(
+        [
+            float(np.clip(values[0], -1.0, 1.0)),
+            float(np.clip(values[1], -1.0, 1.0)),
+            float(np.clip(values[2], -1.0, 1.0)),
+        ],
+        dtype=np.float32,
+    )
+
+
 def _normalize_obs(vec: VecNormalize, obs: np.ndarray) -> np.ndarray:
     batched = obs.reshape(1, -1)
     normed = vec.normalize_obs(batched)
@@ -161,8 +182,11 @@ def rollout(
             "distance": float(inf.get("distance", 0.0)),
             "speed": float(inf.get("speed", 0.0)),
             "heading_error": float(inf.get("heading_error", 0.0)),
-            "thrust": float(inf.get("thrust", 0.0)),
-            "torque": float(inf.get("torque", 0.0)),
+            "axial": float(inf.get("axial", 0.0)),
+            "lateral": float(inf.get("lateral", 0.0)),
+            "yaw": float(inf.get("yaw", 0.0)),
+            "thrust": float(inf.get("thrust", inf.get("axial", 0.0))),
+            "torque": float(inf.get("torque", inf.get("yaw", 0.0))),
             "reward": float(reward),
             "reward_total": float(reward_total),
             "components": inf.get("reward_components") or {},
@@ -178,10 +202,11 @@ def rollout(
 
     for step in range(1, limit + 1):
         if model is None:
-            action = rng.uniform(-1.0, 1.0, size=(2,)).astype(np.float32)
+            action = rng.uniform(-1.0, 1.0, size=(3,)).astype(np.float32)
         else:
             policy_obs = _normalize_obs(vecnorm, obs) if vecnorm is not None else obs
-            action, _ = model.predict(policy_obs, deterministic=True)
+            raw, _ = model.predict(policy_obs, deterministic=True)
+            action = policy_action_to_commands(raw)
         obs, reward, terminated, truncated, info = env.step(action)
         reward_total += float(reward)
         done = bool(terminated or truncated)

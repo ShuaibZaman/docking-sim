@@ -23,6 +23,7 @@ class WorldConfig:
     mass: float = 1.0
     inertia: float = 0.15
     thrust_max: float = 4.0
+    lateral_thrust_max: float = 2.0
     torque_max: float = 2.0
     ship_radius: float = 0.28
     fuel_capacity: float = 100.0
@@ -127,28 +128,40 @@ def docking_success(state: ShipState, cfg: WorldConfig) -> bool:
 
 def step_ship(
     state: ShipState,
-    thrust_cmd: float,
-    torque_cmd: float,
+    axial_cmd: float,
+    lateral_cmd: float,
+    yaw_cmd: float,
     cfg: WorldConfig,
 ) -> tuple[ShipState, float]:
-    """Semi-implicit Euler. thrust_cmd in [0, 1], torque_cmd in [-1, 1]."""
-    thrust_cmd = float(np.clip(thrust_cmd, 0.0, 1.0))
-    torque_cmd = float(np.clip(torque_cmd, -1.0, 1.0))
+    """Semi-implicit Euler.
+
+    axial_cmd in [-1, 1]: +1 nose thrust, -1 brake along the heading.
+    lateral_cmd in [-1, 1]: strafe along (-sin theta, cos theta).
+    yaw_cmd in [-1, 1].
+    """
+    axial_cmd = float(np.clip(axial_cmd, -1.0, 1.0))
+    lateral_cmd = float(np.clip(lateral_cmd, -1.0, 1.0))
+    yaw_cmd = float(np.clip(yaw_cmd, -1.0, 1.0))
 
     if state.fuel <= 1e-8:
-        thrust_cmd = 0.0
-        torque_cmd = 0.0
+        axial_cmd = 0.0
+        lateral_cmd = 0.0
+        yaw_cmd = 0.0
 
     fuel_used = (
-        abs(thrust_cmd) * cfg.fuel_thrust_rate
-        + abs(torque_cmd) * cfg.fuel_torque_rate
+        abs(axial_cmd) * cfg.fuel_thrust_rate
+        + abs(lateral_cmd) * cfg.fuel_thrust_rate
+        + abs(yaw_cmd) * cfg.fuel_torque_rate
     ) * cfg.dt
     fuel_used = float(min(fuel_used, max(state.fuel, 0.0)))
 
-    thrust = thrust_cmd * cfg.thrust_max
-    torque = torque_cmd * cfg.torque_max
-    ax = (thrust * np.cos(state.theta)) / cfg.mass
-    ay = (thrust * np.sin(state.theta)) / cfg.mass
+    axial = axial_cmd * cfg.thrust_max
+    lateral = lateral_cmd * cfg.lateral_thrust_max
+    torque = yaw_cmd * cfg.torque_max
+    cos_t = float(np.cos(state.theta))
+    sin_t = float(np.sin(state.theta))
+    ax = (axial * cos_t - lateral * sin_t) / cfg.mass
+    ay = (axial * sin_t + lateral * cos_t) / cfg.mass
     alpha = torque / cfg.inertia
 
     vx = state.vx + ax * cfg.dt
