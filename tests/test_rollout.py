@@ -1,6 +1,6 @@
 import numpy as np
 
-from docking_sim.replay.rollout import policy_action_to_commands, rollout
+from docking_sim.replay.rollout import command_fields, policy_action_to_commands, rollout
 
 
 def test_random_rollout_is_seed_deterministic():
@@ -35,6 +35,26 @@ def test_two_action_policy_maps_to_forward_only():
     assert abs(float(full[0]) - 1.0) < 1e-6
     assert float(full[1]) == 0.0
     assert abs(float(full[2]) - 0.25) < 1e-6
+
+
+def test_command_fields_fill_missing_pair_from_the_other():
+    from_legacy = command_fields({"thrust": 0.4, "torque": -0.2})
+    assert from_legacy["axial"] == 0.4
+    assert from_legacy["yaw"] == -0.2
+    assert from_legacy["thrust"] == 0.4
+    assert from_legacy["torque"] == -0.2
+    assert from_legacy["lateral"] == 0.0
+
+    from_new = command_fields({"axial": -0.5, "lateral": 0.25, "yaw": 0.1})
+    assert from_new["thrust"] == -0.5
+    assert from_new["torque"] == 0.1
+    assert from_new["lateral"] == 0.25
+
+    both = command_fields({"axial": 1.0, "yaw": 0.3, "thrust": 0.0, "torque": 0.0})
+    assert both["axial"] == 1.0
+    assert both["thrust"] == 1.0
+    assert both["yaw"] == 0.3
+    assert both["torque"] == 0.3
 
 
 def test_three_action_policy_keeps_strafe_and_brake():

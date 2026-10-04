@@ -35,6 +35,16 @@ def test_lateral_accelerates_perpendicular_to_heading():
     assert fuel_used > 0.0
 
 
+def test_lateral_fuel_matches_its_lower_thrust():
+    cfg = WorldConfig(dt=0.05, linear_damping=0.0, angular_damping=0.0)
+    state = _still()
+    _, axial_fuel = step_ship(state, 1.0, 0.0, 0.0, cfg)
+    _, lateral_fuel = step_ship(state, 0.0, 1.0, 0.0, cfg)
+    assert abs(axial_fuel - cfg.fuel_thrust_rate * cfg.dt) < 1e-9
+    assert abs(lateral_fuel - cfg.fuel_lateral_rate * cfg.dt) < 1e-9
+    assert abs(lateral_fuel / axial_fuel - cfg.lateral_thrust_max / cfg.thrust_max) < 1e-9
+
+
 def test_yaw_changes_angular_velocity():
     cfg = WorldConfig(dt=0.05, linear_damping=0.0)
     state = _still()

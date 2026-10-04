@@ -28,6 +28,7 @@ class WorldConfig:
     ship_radius: float = 0.28
     fuel_capacity: float = 100.0
     fuel_thrust_rate: float = 8.0
+    fuel_lateral_rate: float = 4.0
     fuel_torque_rate: float = 2.0
     hull_cx: float = 0.0
     hull_cy: float = 6.6
@@ -150,7 +151,7 @@ def step_ship(
 
     fuel_used = (
         abs(axial_cmd) * cfg.fuel_thrust_rate
-        + abs(lateral_cmd) * cfg.fuel_thrust_rate
+        + abs(lateral_cmd) * cfg.fuel_lateral_rate
         + abs(yaw_cmd) * cfg.fuel_torque_rate
     ) * cfg.dt
     fuel_used = float(min(fuel_used, max(state.fuel, 0.0)))

@@ -96,6 +96,33 @@ def policy_action_to_commands(action: np.ndarray) -> np.ndarray:
     )
 
 
+def command_fields(inf: dict[str, Any]) -> dict[str, float]:
+    """Prefer axial/yaw, and copy them onto the thrust/torque aliases.
+
+    An older info dict may only have thrust and torque. A newer one may only
+    have axial and yaw. Whichever pair is present, both names on the frame
+    carry the same number.
+    """
+
+    def pick(primary: str, legacy: str) -> float:
+        if primary in inf and inf[primary] is not None:
+            return float(inf[primary])
+        if legacy in inf and inf[legacy] is not None:
+            return float(inf[legacy])
+        return 0.0
+
+    axial = pick("axial", "thrust")
+    yaw = pick("yaw", "torque")
+    lateral = float(inf["lateral"]) if "lateral" in inf and inf["lateral"] is not None else 0.0
+    return {
+        "axial": axial,
+        "lateral": lateral,
+        "yaw": yaw,
+        "thrust": axial,
+        "torque": yaw,
+    }
+
+
 def _normalize_obs(vec: VecNormalize, obs: np.ndarray) -> np.ndarray:
     batched = obs.reshape(1, -1)
     normed = vec.normalize_obs(batched)
@@ -182,11 +209,7 @@ def rollout(
             "distance": float(inf.get("distance", 0.0)),
             "speed": float(inf.get("speed", 0.0)),
             "heading_error": float(inf.get("heading_error", 0.0)),
-            "axial": float(inf.get("axial", 0.0)),
-            "lateral": float(inf.get("lateral", 0.0)),
-            "yaw": float(inf.get("yaw", 0.0)),
-            "thrust": float(inf.get("thrust", inf.get("axial", 0.0))),
-            "torque": float(inf.get("torque", inf.get("yaw", 0.0))),
+            **command_fields(inf),
             "reward": float(reward),
             "reward_total": float(reward_total),
             "components": inf.get("reward_components") or {},
