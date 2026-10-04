@@ -14,6 +14,8 @@ export type RunSummary = {
   seed: number;
   total_timesteps: number;
   config_name?: string;
+  family?: string;
+  legacy?: boolean;
   episode_count: number;
   success_rate_window: number;
 };
@@ -110,4 +112,21 @@ export type Metrics = {
   episode_count: number;
   success_rate_window: number;
   episodes: EpisodeMetric[];
+};
+
+export type EvalPoint = {
+  timesteps: number;
+  checkpoint: string;
+  success_rate: number;
+  crash_rate: number;
+  median_steps: number | null;
+  n: number;
+};
+
+export type EvalSummary = {
+  id: string;
+  family: string;
+  legacy: boolean;
+  seed: number;
+  points: EvalPoint[];
 };

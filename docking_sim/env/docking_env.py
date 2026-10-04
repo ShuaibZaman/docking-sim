@@ -63,6 +63,8 @@ class DockingEnv(gym.Env):
 
         self._state = self._default_state()
         self._step_count = 0
+        self._prev_distance = 0.0
+        self._fuel_used_total = 0.0
         self._last_components: dict[str, float] = {}
 
     def _default_state(self) -> ShipState:
@@ -140,6 +142,7 @@ class DockingEnv(gym.Env):
             "crash": bool(crash),
             "timeout": bool(timeout),
             "fuel_used": float(fuel_used),
+            "fuel_used_total": float(self._fuel_used_total),
             "axial": float(axial),
             "lateral": float(lateral),
             "yaw": float(yaw),
@@ -161,7 +164,9 @@ class DockingEnv(gym.Env):
         else:
             self._state = self._spawn_state()
         self._step_count = 0
+        self._fuel_used_total = 0.0
         self._last_components = {}
+        self._prev_distance = self._metrics(self._state)["distance"]
         obs = self._observe(self._state)
         return obs, self._info(self._state)
 
@@ -179,8 +184,10 @@ class DockingEnv(gym.Env):
         timeout = self._step_count >= self.max_steps and not success and not crash
 
         metrics = self._metrics(self._state)
+        self._fuel_used_total += fuel_used
         ctx = RewardContext(
             distance=metrics["distance"],
+            prev_distance=self._prev_distance,
             speed=metrics["speed"],
             heading_error=metrics["heading_error"],
             fuel_used=fuel_used,
@@ -188,6 +195,7 @@ class DockingEnv(gym.Env):
             crash=crash,
             timeout=timeout,
         )
+        self._prev_distance = metrics["distance"]
         reward, components = self._reward_fn(ctx)
         self._last_components = components
 

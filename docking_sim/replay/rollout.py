@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from stable_baselines3 import PPO
+from stable_baselines3 import PPO, SAC
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 from docking_sim.config import ARTIFACTS, env_kwargs_from_config, load_yaml
@@ -129,12 +129,22 @@ def _normalize_obs(vec: VecNormalize, obs: np.ndarray) -> np.ndarray:
     return np.asarray(normed, dtype=np.float32).reshape(-1)
 
 
+def load_policy(path: Path, algo_name: str):
+    name = str(algo_name or "ppo").lower()
+    if name == "sac":
+        return SAC.load(str(path), device="cpu")
+    return PPO.load(str(path), device="cpu")
+
+
 def rollout(
     *,
     run_id: str | None = None,
     checkpoint: str = "random",
     seed: int = 42,
     max_steps: int | None = None,
+    randomize_start: bool | None = None,
+    model=None,
+    vecnorm: VecNormalize | None = None,
 ) -> dict[str, Any]:
     run_dir = ARTIFACTS / run_id if run_id else None
     cfg: dict[str, Any] = {}
@@ -144,6 +154,8 @@ def rollout(
         cfg = load_yaml(run_dir / "config.yaml")
         env_kwargs = env_kwargs_from_config(cfg)
         meta = load_run_meta(run_dir)
+    if randomize_start is not None:
+        env_kwargs["randomize_start"] = bool(randomize_start)
 
     env = DockingEnv(**env_kwargs)
     obs, info = env.reset(seed=int(seed))
@@ -172,21 +184,22 @@ def rollout(
     }
     dt = float(env.cfg.dt)
 
-    model = None
-    vecnorm: VecNormalize | None = None
-    if checkpoint != "random":
+    owns_vecnorm = False
+    if checkpoint != "random" and model is None:
         if run_dir is None:
             raise FileNotFoundError("checkpoint replay requires a run_id")
         zip_path = run_dir / "checkpoints" / f"{checkpoint}.zip"
         if not zip_path.exists():
             raise FileNotFoundError(f"checkpoint not found: {zip_path}")
-        model = PPO.load(str(zip_path), device="cpu")
+        algo_name = str((cfg.get("algo") or {}).get("name") or meta.get("algorithm") or "ppo")
+        model = load_policy(zip_path, algo_name)
         vn_path = _vecnormalize_for_checkpoint(run_dir, checkpoint)
         if vn_path is not None:
             dummy = DummyVecEnv([lambda: DockingEnv(**env_kwargs)])
             vecnorm = VecNormalize.load(str(vn_path), dummy)
             vecnorm.training = False
             vecnorm.norm_reward = False
+            owns_vecnorm = True
 
     rng = np.random.default_rng(seed)
     frames: list[dict[str, Any]] = []
@@ -238,7 +251,7 @@ def rollout(
             break
 
     env.close()
-    if vecnorm is not None:
+    if owns_vecnorm and vecnorm is not None:
         vecnorm.close()
 
     return {

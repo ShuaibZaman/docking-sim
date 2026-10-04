@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from docking_sim.config import ARTIFACTS
+from docking_sim.replay.eval import read_eval_rows, summarize_rows
 from docking_sim.replay.rollout import list_checkpoints, list_run_dirs, load_run_meta, rollout
 
 
@@ -34,6 +35,18 @@ def _run_dir_or_404(run_id: str) -> Path:
     if not run_dir.exists() or not (run_dir / "config.yaml").exists():
         raise HTTPException(status_code=404, detail=f"run not found: {run_id}")
     return run_dir
+
+
+def _family(meta: dict[str, Any]) -> str:
+    if meta.get("family"):
+        return str(meta["family"])
+    config_name = str(meta.get("config_name") or "")
+    stem = config_name.replace(".yaml", "")
+    return stem or "run"
+
+
+def _legacy(meta: dict[str, Any]) -> bool:
+    return _family(meta) in {"ppo_mlp_static", "ppo_mlp_smoke", "ppo_mlp_wide", "ppo_mlp_deep"}
 
 
 def _metrics_summary(run_dir: Path, limit: int = 400) -> dict[str, Any]:
@@ -78,6 +91,8 @@ def get_runs() -> list[dict[str, Any]]:
                 "seed": meta.get("seed", 42),
                 "total_timesteps": meta.get("total_timesteps", 0),
                 "config_name": meta.get("config_name", ""),
+                "family": _family(meta),
+                "legacy": _legacy(meta),
                 "episode_count": summary["episode_count"],
                 "success_rate_window": summary["success_rate_window"],
             }
@@ -102,6 +117,20 @@ def get_checkpoints(run_id: str) -> list[dict[str, Any]]:
 def get_metrics(run_id: str) -> dict[str, Any]:
     run_dir = _run_dir_or_404(run_id)
     return _metrics_summary(run_dir)
+
+
+@app.get("/api/runs/{run_id}/eval")
+def get_eval(run_id: str) -> dict[str, Any]:
+    run_dir = _run_dir_or_404(run_id)
+    meta = load_run_meta(run_dir)
+    points = summarize_rows(read_eval_rows(run_dir / "eval.jsonl"))
+    return {
+        "id": run_id,
+        "family": _family(meta),
+        "legacy": _legacy(meta),
+        "seed": meta.get("seed", 42),
+        "points": points,
+    }
 
 
 @app.post("/api/replay")

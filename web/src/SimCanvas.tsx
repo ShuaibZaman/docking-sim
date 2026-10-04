@@ -5,6 +5,7 @@ type Props = {
   world: World | null;
   frames: Frame[];
   index: number;
+  ghost?: Frame[] | null;
   selection: Selection | null;
   onSelect: (selection: Selection | null) => void;
 };
@@ -182,7 +183,7 @@ function roundBox(
   ctx.stroke();
 }
 
-export function SimCanvas({ world, frames, index, selection, onSelect }: Props) {
+export function SimCanvas({ world, frames, index, ghost, selection, onSelect }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const stateRef = useRef({ world, frames, index });
   stateRef.current = { world, frames, index };
@@ -242,6 +243,23 @@ export function SimCanvas({ world, frames, index, selection, onSelect }: Props) 
         wx(world.port.cx, world, width),
         port.y + port.h + 28,
       );
+
+      if (ghost && ghost.length > 1) {
+        const ghostEnd = Math.min(index, ghost.length - 1);
+        const ghostTrail = ghost.slice(0, ghostEnd + 1);
+        ctx.beginPath();
+        ghostTrail.forEach((frame, i) => {
+          const x = wx(frame.x, world, width);
+          const y = wy(frame.y, world, height);
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        });
+        ctx.strokeStyle = "rgba(126, 182, 255, 0.85)";
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([5, 4]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
 
       const trail = frames.slice(Math.max(0, index - 80), index + 1);
       if (trail.length > 1) {
@@ -347,7 +365,7 @@ export function SimCanvas({ world, frames, index, selection, onSelect }: Props) 
     const observer = new ResizeObserver(render);
     observer.observe(parent);
     return () => observer.disconnect();
-  }, [world, frames, index, selection]);
+  }, [world, frames, index, ghost, selection]);
 
   const pick = (event: MouseEvent<HTMLCanvasElement>) => {
     const canvas = event.currentTarget;

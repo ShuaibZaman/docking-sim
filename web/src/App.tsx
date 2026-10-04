@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { fetchCheckpoints, fetchMetrics, fetchReplay, fetchRuns } from "./api";
+import { fetchCheckpoints, fetchEval, fetchMetrics, fetchReplay, fetchRuns } from "./api";
 import { SimCanvas } from "./SimCanvas";
-import type { Checkpoint, Frame, Metrics, Replay, RunSummary, Selection, World } from "./types";
+import type { Checkpoint, EvalSummary, Frame, Metrics, Replay, RunSummary, Selection, World } from "./types";
 import "./App.css";
 
 const RANDOM_CKPT: Checkpoint = { id: "random", label: "Random policy", steps: 0, path: null };
@@ -37,15 +37,106 @@ function epochTitle(ck: Checkpoint): string {
 }
 
 function formatRunLabel(run: RunSummary): string {
-  const steps = formatSteps(run.total_timesteps);
-  const source = (run.config_name || run.id).replace(/\.yaml$/i, "");
-  const slug = source.replace(/^\d{8}_\d{6}_/, "");
-  let name = slug.replace(/_/g, " ");
-  if (slug.includes("static")) name = "Static MLP";
-  else if (slug.includes("smoke")) name = "Smoke MLP";
-  else if (slug.includes("wide")) name = "Wide MLP";
-  else if (slug.includes("deep")) name = "Deep MLP";
-  return `${name} · ${steps}`;
+  const family = run.family || (run.config_name || run.id).replace(/\.yaml$/i, "");
+  const seed = Number.isFinite(run.seed) ? ` · seed ${run.seed}` : "";
+  if (run.legacy || family === "ppo_mlp_static") return `Legacy 2-action${seed}`;
+  if (family.includes("distance")) return `PPO 64 distance${seed}`;
+  if (family.startsWith("sac")) return `SAC 64${seed}`;
+  if (family.includes("wide")) return `PPO wide${seed}`;
+  if (family.includes("deep")) return `PPO deep${seed}`;
+  if (family.includes("smoke")) return `Smoke MLP${seed}`;
+  if (family.includes("ppo_64")) return `PPO 64${seed}`;
+  return `${family.replace(/_/g, " ")}${seed}`;
+}
+
+const CURVE_COLORS = ["#e8a54b", "#3ee0c5", "#7eb6ff", "#d38bff"];
+
+type CurvePoint = { x: number; y: number; low?: number; high?: number };
+
+function CurveChart({
+  series,
+  markerX,
+  label,
+}: {
+  series: { name: string; color: string; points: CurvePoint[] }[];
+  markerX?: number | null;
+  label: string;
+}) {
+  const all = series.flatMap((item) => item.points);
+  if (all.length < 1) {
+    return <p className="empty">Held-out eval appears after the first checkpoint.</p>;
+  }
+  const xs = all.map((point) => point.x);
+  const ys = all.flatMap((point) => [point.y, point.low ?? point.y, point.high ?? point.y]);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(0, ...ys);
+  const maxY = Math.max(...ys, 1e-6);
+  const spanX = Math.max(1, maxX - minX);
+  const spanY = Math.max(1e-6, maxY - minY);
+  const xOf = (value: number) => ((value - minX) / spanX) * 280 + 10;
+  const yOf = (value: number) => 58 - ((value - minY) / spanY) * 50;
+  const marker = markerX != null && markerX >= minX && markerX <= maxX ? xOf(markerX) : null;
+  return (
+    <div>
+      <svg className="chart" viewBox="0 0 300 64" role="img" aria-label={label}>
+        {marker != null ? (
+          <line x1={marker} x2={marker} y1="4" y2="60" stroke="#d6dde8" strokeDasharray="2 2" />
+        ) : null}
+        {series.map((item) => {
+          if (item.points.length === 0) return null;
+          if (item.points.length === 1) {
+            const point = item.points[0];
+            return <circle key={item.name} cx={xOf(point.x)} cy={yOf(point.y)} r="2.5" fill={item.color} />;
+          }
+          const line = item.points
+            .map((point, i) => `${i === 0 ? "M" : "L"}${xOf(point.x).toFixed(1)},${yOf(point.y).toFixed(1)}`)
+            .join(" ");
+          const hasBand = item.points.some((point) => point.low != null && point.high != null && point.low !== point.high);
+          const forward = item.points
+            .map((point, i) => `${i === 0 ? "M" : "L"}${xOf(point.x).toFixed(1)},${yOf(point.high ?? point.y).toFixed(1)}`)
+            .join(" ");
+          const back = [...item.points]
+            .reverse()
+            .map((point) => `L${xOf(point.x).toFixed(1)},${yOf(point.low ?? point.y).toFixed(1)}`)
+            .join(" ");
+          return (
+            <g key={item.name}>
+              {hasBand ? <path d={`${forward} ${back}`} fill={item.color} opacity="0.18" /> : null}
+              <path d={line} fill="none" stroke={item.color} strokeWidth="1.6" />
+            </g>
+          );
+        })}
+      </svg>
+      <div className="chart-scale">
+        <span>{maxY >= 10 ? maxY.toFixed(0) : maxY.toFixed(2)}</span>
+        <span>{minY >= 10 ? minY.toFixed(0) : minY.toFixed(2)}</span>
+      </div>
+    </div>
+  );
+}
+
+function familyBand(
+  runs: RunSummary[],
+  evals: Record<string, EvalSummary>,
+  family: string,
+  key: "success_rate" | "crash_rate" | "median_steps",
+): CurvePoint[] {
+  const grouped = new Map<number, number[]>();
+  for (const run of runs.filter((item) => item.family === family)) {
+    for (const point of evals[run.id]?.points ?? []) {
+      const value = point[key];
+      if (value == null) continue;
+      const bucket = grouped.get(point.timesteps) ?? [];
+      bucket.push(value);
+      grouped.set(point.timesteps, bucket);
+    }
+  }
+  return [...grouped.keys()].sort((a, b) => a - b).map((timesteps) => {
+    const values = grouped.get(timesteps) ?? [];
+    const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+    return { x: timesteps, y: mean, low: Math.min(...values), high: Math.max(...values) };
+  });
 }
 
 function toDeg(radians: number): number {
@@ -91,40 +182,6 @@ function RewardBars({ frame }: { frame: Frame | undefined }) {
           <span>{value.toFixed(2)}</span>
         </div>
       ))}
-    </div>
-  );
-}
-
-function RewardChart({ metrics, mark }: { metrics: Metrics | null; mark?: number }) {
-  const points = metrics?.episodes ?? [];
-  if (points.length < 2) {
-    return <p className="empty">Train a run to plot episode reward.</p>;
-  }
-  const rewards = points.map((p) => p.reward);
-  const min = Math.min(...rewards);
-  const max = Math.max(...rewards);
-  const span = Math.max(1e-6, max - min);
-  const d = rewards
-    .map((r, i) => {
-      const x = (i / (rewards.length - 1)) * 300;
-      const y = 58 - ((r - min) / span) * 50;
-      return `${i === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`;
-    })
-    .join(" ");
-  const markY =
-    mark !== undefined && mark >= min && mark <= max ? 58 - ((mark - min) / span) * 50 : null;
-  return (
-    <div>
-      <svg className="chart" viewBox="0 0 300 64" role="img" aria-label="Episode reward">
-        {markY !== null ? (
-          <line x1="0" x2="300" y1={markY} y2={markY} stroke="#3ee0c5" strokeDasharray="3 3" strokeWidth="1" />
-        ) : null}
-        <path d={d} fill="none" stroke="#e8a54b" strokeWidth="1.6" />
-      </svg>
-      <div className="chart-scale">
-        <span>{max.toFixed(0)}</span>
-        <span>{min.toFixed(0)}</span>
-      </div>
     </div>
   );
 }
@@ -304,6 +361,10 @@ export default function App() {
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState<(typeof SPEEDS)[number]>(2);
   const [selection, setSelection] = useState<Selection | null>(null);
+  const [evals, setEvals] = useState<Record<string, EvalSummary>>({});
+  const [compare, setCompare] = useState<string[]>([]);
+  const [ghostId, setGhostId] = useState("");
+  const [ghostFrames, setGhostFrames] = useState<Frame[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -314,6 +375,13 @@ export default function App() {
       })
       .catch((err: Error) => setError(err.message));
   }, []);
+
+  useEffect(() => {
+    if (!runs.length) return;
+    Promise.all(runs.map((run) => fetchEval(run.id).then((data) => [run.id, data] as const)))
+      .then((pairs) => setEvals(Object.fromEntries(pairs)))
+      .catch((err: Error) => setError(err.message));
+  }, [runs]);
 
   useEffect(() => {
     if (!runId) {
@@ -372,9 +440,45 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [playing, frames.length, dtMs, speed]);
 
+  useEffect(() => {
+    if (!ghostId) {
+      setGhostFrames([]);
+      return;
+    }
+    let cancelled = false;
+    const currentSteps = checkpoints.find((item) => item.id === checkpoint)?.steps;
+    fetchCheckpoints(ghostId)
+      .then((ghostCheckpoints) => {
+        const matched =
+          currentSteps != null
+            ? ghostCheckpoints.find((item) => item.id !== "random" && item.steps === currentSteps)
+            : undefined;
+        const ghostCheckpoint = matched?.id ?? (ghostCheckpoints.some((item) => item.id === "final") ? "final" : "random");
+        return fetchReplay({ run_id: ghostId, checkpoint: ghostCheckpoint, seed });
+      })
+      .then((data) => {
+        if (!cancelled) setGhostFrames(data.frames);
+      })
+      .catch((err: Error) => {
+        if (!cancelled) setError(err.message);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [ghostId, seed, checkpoint, checkpoints]);
+
   const outcome = outcomeText(frame);
   const meta = replay?.meta ?? {};
   const successRate = metrics?.success_rate_window ?? selectedRun?.success_rate_window ?? 0;
+  const selectedEval = runId ? evals[runId] : undefined;
+  const selectedCheckpoint = checkpoints.find((item) => item.id === checkpoint);
+  const markerTimesteps =
+    checkpoint === "final"
+      ? selectedEval?.points[selectedEval.points.length - 1]?.timesteps
+      : selectedCheckpoint && selectedCheckpoint.steps > 0 && selectedCheckpoint.steps < 1e12
+        ? selectedCheckpoint.steps
+        : null;
+  const families = [...new Set(runs.filter((run) => !run.legacy && run.family).map((run) => run.family as string))];
 
   const handleSelect = (next: Selection | null) => {
     setSelection(next);
@@ -434,6 +538,7 @@ export default function App() {
               world={replay?.world ?? null}
               frames={frames}
               index={index}
+              ghost={ghostFrames}
               selection={selection}
               onSelect={handleSelect}
             />
@@ -472,8 +577,94 @@ export default function App() {
             <EpisodeSummary frame={frame} successRate={successRate} />
           )}
 
+          <h2>Growth</h2>
+          <p className="note">Held-out docks. The marker is the epoch on the scrubber.</p>
+          <CurveChart
+            label="Held-out success"
+            markerX={markerTimesteps}
+            series={[
+              {
+                name: "success",
+                color: "#3ee0c5",
+                points: (selectedEval?.points ?? []).map((point) => ({ x: point.timesteps, y: point.success_rate })),
+              },
+            ]}
+          />
+          <CurveChart
+            label="Held-out crashes"
+            markerX={markerTimesteps}
+            series={[
+              {
+                name: "crash",
+                color: "#e85d4c",
+                points: (selectedEval?.points ?? []).map((point) => ({ x: point.timesteps, y: point.crash_rate })),
+              },
+            ]}
+          />
+          <CurveChart
+            label="Median steps to dock"
+            markerX={markerTimesteps}
+            series={[
+              {
+                name: "steps",
+                color: "#e8a54b",
+                points: (selectedEval?.points ?? [])
+                  .filter((point) => point.median_steps != null)
+                  .map((point) => ({ x: point.timesteps, y: point.median_steps as number })),
+              },
+            ]}
+          />
+
+          <h2>Compare</h2>
+          <div className="compare">
+            {families.map((family) => (
+              <label key={family}>
+                <input
+                  type="checkbox"
+                  checked={compare.includes(family)}
+                  onChange={() => {
+                    setCompare((current) => {
+                      if (current.includes(family)) return current.filter((item) => item !== family);
+                      if (current.length >= 4) return current;
+                      return [...current, family];
+                    });
+                  }}
+                />
+                {family.replace(/_/g, " ")}
+              </label>
+            ))}
+          </div>
+          <CurveChart
+            label="Compared success"
+            series={compare.map((family, index) => ({
+              name: family,
+              color: CURVE_COLORS[index % CURVE_COLORS.length],
+              points: familyBand(runs, evals, family, "success_rate"),
+            }))}
+          />
+          <CurveChart
+            label="Compared crashes"
+            series={compare.map((family, index) => ({
+              name: family,
+              color: CURVE_COLORS[index % CURVE_COLORS.length],
+              points: familyBand(runs, evals, family, "crash_rate"),
+            }))}
+          />
+          <label>
+            Ghost
+            <select value={ghostId} onChange={(event) => setGhostId(event.target.value)}>
+              <option value="">none</option>
+              {runs
+                .filter((run) => run.id !== runId && !run.legacy)
+                .map((run) => (
+                  <option key={run.id} value={run.id}>
+                    {formatRunLabel(run)}
+                  </option>
+                ))}
+            </select>
+          </label>
+
           <h2>Reward</h2>
-          <RewardChart metrics={metrics} mark={replay?.reward_total} />
           <RewardBars frame={frame} />
           {error ? <p className="error">{error}</p> : null}
         </aside>

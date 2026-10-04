@@ -1,4 +1,4 @@
-import type { Checkpoint, Metrics, Replay, RunSummary } from "./types";
+import type { Checkpoint, EvalSummary, Metrics, Replay, RunSummary } from "./types";
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
@@ -21,6 +21,10 @@ export function fetchRuns(): Promise<RunSummary[]> {
 
 export function fetchCheckpoints(runId: string): Promise<Checkpoint[]> {
   return request(`/api/runs/${encodeURIComponent(runId)}/checkpoints`);
+}
+
+export function fetchEval(runId: string): Promise<EvalSummary> {
+  return request(`/api/runs/${encodeURIComponent(runId)}/eval`);
 }
 
 export function fetchMetrics(runId: string): Promise<Metrics> {
