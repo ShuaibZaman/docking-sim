@@ -94,11 +94,18 @@ class HeldOutEvalCallback(BaseCallback):
 
     def _eval(self, checkpoint: str, timesteps: int) -> None:
         print(f"Held-out eval {checkpoint}", flush=True)
-        rows = evaluate_checkpoint(
-            self.run_dir.name,
-            checkpoint,
-            timesteps=int(timesteps),
-        )
+        try:
+            rows = evaluate_checkpoint(
+                self.run_dir.name,
+                checkpoint,
+                timesteps=int(timesteps),
+            )
+        except ValueError as exc:
+            # A curriculum or pixel run may not match the static comparison
+            # contract. Training remains valid; it simply needs a matching
+            # benchmark suite before it can be ranked with static candidates.
+            print(f"Skipping held-out benchmark eval: {exc}", flush=True)
+            return
         append_eval_rows(self.path, rows)
 
     def _on_step(self) -> bool:

@@ -5,12 +5,21 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from stable_baselines3 import PPO, SAC
+from stable_baselines3 import DDPG, PPO, SAC, TD3
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 from docking_sim.config import ARTIFACTS, env_kwargs_from_config, load_yaml
 from docking_sim.env.docking_env import DockingEnv
 from docking_sim.env.physics import hits_hull, out_of_bounds
+from docking_sim.training.losses import _install_loss_hook
+from docking_sim.training.networks import ResidualFeaturesExtractor  # noqa: F401
+
+ALGO_CLASSES = {
+    "ppo": PPO,
+    "sac": SAC,
+    "td3": TD3,
+    "ddpg": DDPG,
+}
 
 
 def list_run_dirs() -> list[Path]:
@@ -124,16 +133,25 @@ def command_fields(inf: dict[str, Any]) -> dict[str, float]:
 
 
 def _normalize_obs(vec: VecNormalize, obs: np.ndarray) -> np.ndarray:
-    batched = obs.reshape(1, -1)
+    array = np.asarray(obs)
+    if array.ndim >= 3:
+        batched = array[None, ...]
+        normed = vec.normalize_obs(batched)
+        return np.asarray(normed)[0]
+    batched = array.reshape(1, -1)
     normed = vec.normalize_obs(batched)
     return np.asarray(normed, dtype=np.float32).reshape(-1)
 
 
 def load_policy(path: Path, algo_name: str):
     name = str(algo_name or "ppo").lower()
-    if name == "sac":
-        return SAC.load(str(path), device="cpu")
-    return PPO.load(str(path), device="cpu")
+    cls = ALGO_CLASSES.get(name)
+    if cls is None:
+        known = ", ".join(sorted(ALGO_CLASSES))
+        raise ValueError(f"Unsupported algorithm '{algo_name}'. Expected one of: {known}")
+    model = cls.load(str(path), device="cpu")
+    _install_loss_hook(model)
+    return model
 
 
 def rollout(
@@ -143,22 +161,31 @@ def rollout(
     seed: int = 42,
     max_steps: int | None = None,
     randomize_start: bool | None = None,
+    scenario=None,
+    env_kwargs_override: dict[str, Any] | None = None,
+    baseline: str | None = None,
     model=None,
     vecnorm: VecNormalize | None = None,
 ) -> dict[str, Any]:
     run_dir = ARTIFACTS / run_id if run_id else None
     cfg: dict[str, Any] = {}
-    env_kwargs: dict[str, Any] = {}
+    candidate_env_kwargs: dict[str, Any] = {}
     meta: dict[str, Any] = {}
     if run_dir is not None and run_dir.exists():
         cfg = load_yaml(run_dir / "config.yaml")
-        env_kwargs = env_kwargs_from_config(cfg)
+        candidate_env_kwargs = env_kwargs_from_config(cfg)
         meta = load_run_meta(run_dir)
-    if randomize_start is not None:
+    env_kwargs = dict(env_kwargs_override or candidate_env_kwargs)
+    if scenario is None and randomize_start is not None:
         env_kwargs["randomize_start"] = bool(randomize_start)
 
     env = DockingEnv(**env_kwargs)
-    obs, info = env.reset(seed=int(seed))
+    if scenario is not None:
+        scenario_seed = int(getattr(scenario, "seed", seed))
+        reset_options = scenario.reset_options()
+        obs, info = env.reset(seed=scenario_seed, options=reset_options)
+    else:
+        obs, info = env.reset(seed=int(seed))
     limit = int(max_steps or env.max_steps)
     world = {
         "x_min": env.cfg.x_min,
@@ -181,11 +208,13 @@ def rollout(
         "dock_speed_max": float(env.cfg.dock_speed_max),
         "dock_angle_max_deg": float(np.rad2deg(env.cfg.dock_angle_max)),
         "approach_angle": float(env.cfg.port_approach_angle),
+        "scenario_id": info.get("scenario_id"),
+        "scenario_hash": info.get("scenario_hash"),
     }
     dt = float(env.cfg.dt)
 
     owns_vecnorm = False
-    if checkpoint != "random" and model is None:
+    if checkpoint != "random" and model is None and baseline is None:
         if run_dir is None:
             raise FileNotFoundError("checkpoint replay requires a run_id")
         zip_path = run_dir / "checkpoints" / f"{checkpoint}.zip"
@@ -208,8 +237,8 @@ def rollout(
     truncated = False
 
     def snapshot(step: int, reward: float, inf: dict[str, Any], done: bool) -> dict[str, Any]:
-        hull_hit = hits_hull(env._state, env.cfg)
-        left_map = out_of_bounds(env._state, env.cfg)
+        hull_hit = bool(inf.get("hit_hull", hits_hull(env._state, env.cfg, env._pose)))
+        left_map = bool(inf.get("out_of_bounds", out_of_bounds(env._state, env.cfg)))
         return {
             "t": step,
             "x": float(inf.get("x", env._state.x)),
@@ -221,6 +250,9 @@ def rollout(
             "fuel": float(inf.get("fuel", env._state.fuel)),
             "distance": float(inf.get("distance", 0.0)),
             "speed": float(inf.get("speed", 0.0)),
+            "absolute_speed": float(inf.get("absolute_speed", inf.get("speed", 0.0))),
+            "relative_vx": float(inf.get("relative_vx", inf.get("vx", 0.0))),
+            "relative_vy": float(inf.get("relative_vy", inf.get("vy", 0.0))),
             "heading_error": float(inf.get("heading_error", 0.0)),
             **command_fields(inf),
             "reward": float(reward),
@@ -231,13 +263,23 @@ def rollout(
             "crash": bool(inf.get("crash", False)),
             "timeout": bool(inf.get("timeout", False)),
             "hit_hull": bool(hull_hit),
+            "hit_asteroid": bool(inf.get("hit_asteroid", False)),
             "out_of_bounds": bool(left_map),
+            "out_of_fuel": bool(inf.get("out_of_fuel", False)),
+            "terminal_reason": str(inf.get("terminal_reason", "")),
+            "station": inf.get("station"),
+            "port_pose": inf.get("port_pose"),
+            "asteroids": inf.get("asteroids") or [],
         }
 
     frames.append(snapshot(0, 0.0, info, False))
 
     for step in range(1, limit + 1):
-        if model is None:
+        if baseline is not None:
+            from docking_sim.replay.controllers import controller_action
+
+            action = controller_action(baseline, env)
+        elif model is None:
             action = rng.uniform(-1.0, 1.0, size=(3,)).astype(np.float32)
         else:
             policy_obs = _normalize_obs(vecnorm, obs) if vecnorm is not None else obs
@@ -257,7 +299,10 @@ def rollout(
     return {
         "run_id": run_id,
         "checkpoint": checkpoint,
+        "baseline": baseline,
         "seed": int(seed),
+        "scenario_id": info.get("scenario_id"),
+        "scenario_hash": info.get("scenario_hash"),
         "success": bool(frames[-1]["success"]),
         "crash": bool(frames[-1]["crash"]),
         "timeout": bool(frames[-1]["timeout"]),

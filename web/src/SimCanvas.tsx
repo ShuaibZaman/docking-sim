@@ -1,17 +1,19 @@
 import { useEffect, useRef, type MouseEvent } from "react";
-import type { Frame, Selection, World } from "./types";
+import type { Frame, PoseBox, Selection, World } from "./types";
+
+export type GhostTrail = {
+  frames: Frame[];
+  color: string;
+};
 
 type Props = {
   world: World | null;
   frames: Frame[];
   index: number;
-  ghost?: Frame[] | null;
+  ghosts?: GhostTrail[];
   selection: Selection | null;
   onSelect: (selection: Selection | null) => void;
 };
-
-type Rect = { x: number; y: number; w: number; h: number };
-type Box = { cx: number; cy: number; w: number; h: number };
 
 function wx(x: number, world: World, width: number): number {
   return ((x - world.x_min) / (world.x_max - world.x_min)) * width;
@@ -25,17 +27,58 @@ function shipRadiusPx(world: World, width: number): number {
   return Math.max(6, (world.ship_radius / (world.x_max - world.x_min)) * width * 1.8);
 }
 
-function boxRect(box: Box, world: World, width: number, height: number): Rect {
+function stationPose(frame: Frame | undefined, world: World): PoseBox {
+  return (
+    frame?.station ?? {
+      cx: world.hull.cx,
+      cy: world.hull.cy,
+      theta: 0,
+      w: world.hull.w,
+      h: world.hull.h,
+    }
+  );
+}
+
+function portPose(frame: Frame | undefined, world: World): PoseBox {
+  return (
+    frame?.port_pose ?? {
+      cx: world.port.cx,
+      cy: world.port.cy,
+      theta: 0,
+      w: world.port.w,
+      h: world.port.h,
+    }
+  );
+}
+
+function worldFromPixel(px: number, py: number, world: World, width: number, height: number) {
   return {
-    x: wx(box.cx - box.w / 2, world, width),
-    y: wy(box.cy + box.h / 2, world, height),
-    w: (box.w / (world.x_max - world.x_min)) * width,
-    h: (box.h / (world.y_max - world.y_min)) * height,
+    x: world.x_min + (px / width) * (world.x_max - world.x_min),
+    y: world.y_max - (py / height) * (world.y_max - world.y_min),
   };
 }
 
-function pointInRect(px: number, py: number, rect: Rect): boolean {
-  return px >= rect.x && px <= rect.x + rect.w && py >= rect.y && py <= rect.y + rect.h;
+function pointInPose(x: number, y: number, pose: PoseBox): boolean {
+  const dx = x - pose.cx;
+  const dy = y - pose.cy;
+  const c = Math.cos(pose.theta);
+  const s = Math.sin(pose.theta);
+  const lx = c * dx + s * dy;
+  const ly = -s * dx + c * dy;
+  return Math.abs(lx) <= pose.w / 2 && Math.abs(ly) <= pose.h / 2;
+}
+
+function poseCorners(pose: PoseBox): Array<[number, number]> {
+  const c = Math.cos(pose.theta);
+  const s = Math.sin(pose.theta);
+  const hw = pose.w / 2;
+  const hh = pose.h / 2;
+  return [
+    [-hw, -hh],
+    [hw, -hh],
+    [hw, hh],
+    [-hw, hh],
+  ].map(([lx, ly]) => [pose.cx + c * lx - s * ly, pose.cy + s * lx + c * ly]);
 }
 
 export function hitTest(
@@ -56,10 +99,11 @@ export function hitTest(
   if ((px - sx) ** 2 + (py - sy) ** 2 <= (radius * 1.45) ** 2) {
     return { kind: "ship" };
   }
-  if (pointInRect(px, py, boxRect(world.port, world, width, height))) {
+  const cursor = worldFromPixel(px, py, world, width, height);
+  if (pointInPose(cursor.x, cursor.y, portPose(frame, world))) {
     return { kind: "port" };
   }
-  if (pointInRect(px, py, boxRect(world.hull, world, width, height))) {
+  if (pointInPose(cursor.x, cursor.y, stationPose(frame, world))) {
     return { kind: "station" };
   }
 
@@ -135,7 +179,208 @@ function drawPlume(
   ctx.restore();
 }
 
-function drawLegend(ctx: CanvasRenderingContext2D) {
+function strokePose(
+  ctx: CanvasRenderingContext2D,
+  pose: PoseBox,
+  world: World,
+  width: number,
+  height: number,
+  stroke: string,
+  lineWidth: number,
+  dashed = false,
+) {
+  const corners = poseCorners(pose);
+  ctx.beginPath();
+  corners.forEach(([x, y], i) => {
+    const px = wx(x, world, width);
+    const py = wy(y, world, height);
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  });
+  ctx.closePath();
+  ctx.strokeStyle = stroke;
+  ctx.lineWidth = lineWidth;
+  ctx.setLineDash(dashed ? [5, 4] : []);
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+function drawApproachOverlays(
+  ctx: CanvasRenderingContext2D,
+  world: World,
+  frame: Frame | undefined,
+  width: number,
+  height: number,
+) {
+  const hull = stationPose(frame, world);
+  const dock = portPose(frame, world);
+  const approach = world.approach_angle + dock.theta;
+  const dirX = Math.cos(approach);
+  const dirY = Math.sin(approach);
+  const length = 6;
+  ctx.save();
+  ctx.strokeStyle = "rgba(62, 224, 197, 0.55)";
+  ctx.lineWidth = 1.25;
+  ctx.setLineDash([4, 5]);
+  ctx.beginPath();
+  ctx.moveTo(wx(dock.cx - dirX * length, world, width), wy(dock.cy - dirY * length, world, height));
+  ctx.lineTo(wx(dock.cx, world, width), wy(dock.cy, world, height));
+  ctx.stroke();
+  ctx.setLineDash([]);
+  strokePose(
+    ctx,
+    { ...dock, w: dock.w + 0.2, h: dock.h + 0.2 },
+    world,
+    width,
+    height,
+    "rgba(62, 224, 197, 0.85)",
+    1.25,
+    true,
+  );
+  strokePose(
+    ctx,
+    {
+      ...hull,
+      w: hull.w + world.ship_radius * 2,
+      h: hull.h + world.ship_radius * 2,
+    },
+    world,
+    width,
+    height,
+    "rgba(232, 93, 76, 0.45)",
+    1,
+    true,
+  );
+  ctx.restore();
+}
+
+function drawRelativeInset(
+  ctx: CanvasRenderingContext2D,
+  world: World,
+  frames: Frame[],
+  index: number,
+  width: number,
+  height: number,
+) {
+  const frame = frames[index];
+  if (!frame) return;
+  if (width < 240 || height < 180) return;
+  const boxW = 104;
+  const boxH = 78;
+  const left = width - boxW - 10;
+  const top = 10;
+  ctx.save();
+  ctx.fillStyle = "rgba(7, 9, 15, 0.82)";
+  ctx.strokeStyle = "#2a3344";
+  ctx.lineWidth = 1;
+  ctx.fillRect(left, top, boxW, boxH);
+  ctx.strokeRect(left, top, boxW, boxH);
+  ctx.fillStyle = "#8b93a3";
+  ctx.font = "10px 'IBM Plex Sans', sans-serif";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "top";
+  ctx.fillText("Target frame", left + 8, top + 6);
+
+  const hull = stationPose(frame, world);
+  const dock = portPose(frame, world);
+  const toLocal = (x: number, y: number) => {
+    const dx = x - hull.cx;
+    const dy = y - hull.cy;
+    const c = Math.cos(hull.theta);
+    const s = Math.sin(hull.theta);
+    return [c * dx + s * dy, -s * dx + c * dy] as const;
+  };
+  const span = 8;
+  const plotLeft = left + 8;
+  const plotTop = top + 18;
+  const plotW = boxW - 16;
+  const plotH = boxH - 26;
+  const project = (x: number, y: number) => {
+    const [lx, ly] = toLocal(x, y);
+    return [
+      plotLeft + ((lx + span) / (span * 2)) * plotW,
+      plotTop + ((span - ly) / (span * 2)) * plotH,
+    ] as const;
+  };
+  const history = frames.slice(0, index + 1);
+  if (history.length > 1) {
+    ctx.beginPath();
+    history.forEach((item, i) => {
+      const [px, py] = project(item.x, item.y);
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    });
+    ctx.strokeStyle = "rgba(232, 165, 75, 0.9)";
+    ctx.lineWidth = 1.25;
+    ctx.stroke();
+  }
+  const [portX, portY] = project(dock.cx, dock.cy);
+  ctx.fillStyle = "#3ee0c5";
+  ctx.fillRect(portX - 3, portY - 3, 6, 6);
+  const [shipX, shipY] = project(frame.x, frame.y);
+  ctx.fillStyle = "#f3f1ea";
+  ctx.beginPath();
+  ctx.arc(shipX, shipY, 3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawPose(
+  ctx: CanvasRenderingContext2D,
+  pose: PoseBox,
+  world: World,
+  width: number,
+  height: number,
+  fill: string,
+  stroke: string,
+  lineWidth: number,
+) {
+  const corners = poseCorners(pose);
+  ctx.beginPath();
+  corners.forEach(([x, y], i) => {
+    const px = wx(x, world, width);
+    const py = wy(y, world, height);
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  });
+  ctx.closePath();
+  ctx.fillStyle = fill;
+  ctx.strokeStyle = stroke;
+  ctx.lineWidth = lineWidth;
+  ctx.fill();
+  ctx.stroke();
+}
+
+function drawShipMark(
+  ctx: CanvasRenderingContext2D,
+  frame: Frame,
+  world: World,
+  width: number,
+  height: number,
+  fill: string,
+  stroke: string,
+) {
+  const x = wx(frame.x, world, width);
+  const y = wy(frame.y, world, height);
+  const radius = shipRadiusPx(world, width) * 0.72;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(-frame.theta);
+  ctx.beginPath();
+  ctx.moveTo(radius * 1.6, 0);
+  ctx.lineTo(-radius, radius * 0.9);
+  ctx.lineTo(-radius * 0.45, 0);
+  ctx.lineTo(-radius, -radius * 0.9);
+  ctx.closePath();
+  ctx.fillStyle = fill;
+  ctx.strokeStyle = stroke;
+  ctx.lineWidth = 1.4;
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawLegend(ctx: CanvasRenderingContext2D, showRocks: boolean) {
   const items: Array<[string, string, "box" | "line"]> = [
     ["#f3f1ea", "Ship", "box"],
     ["#3ee0c5", "Port", "box"],
@@ -143,6 +388,7 @@ function drawLegend(ctx: CanvasRenderingContext2D) {
     ["#e8a54b", "Path", "line"],
     ["#7eb6ff", "Velocity", "line"],
   ];
+  if (showRocks) items.splice(3, 0, ["#968872", "Rock", "box"]);
   ctx.fillStyle = "rgba(7, 9, 15, 0.78)";
   ctx.fillRect(12, 12, 108, items.length * 16 + 10);
   ctx.font = "11px 'IBM Plex Sans', sans-serif";
@@ -166,24 +412,7 @@ function drawLegend(ctx: CanvasRenderingContext2D) {
   });
 }
 
-function roundBox(
-  ctx: CanvasRenderingContext2D,
-  rect: Rect,
-  radius: number,
-  fill: string,
-  stroke: string,
-  lineWidth: number,
-) {
-  ctx.fillStyle = fill;
-  ctx.strokeStyle = stroke;
-  ctx.lineWidth = lineWidth;
-  ctx.beginPath();
-  ctx.roundRect(rect.x, rect.y, rect.w, rect.h, radius);
-  ctx.fill();
-  ctx.stroke();
-}
-
-export function SimCanvas({ world, frames, index, ghost, selection, onSelect }: Props) {
+export function SimCanvas({ world, frames, index, ghosts, selection, onSelect }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const stateRef = useRef({ world, frames, index });
   stateRef.current = { world, frames, index };
@@ -208,45 +437,66 @@ export function SimCanvas({ world, frames, index, ghost, selection, onSelect }: 
       drawStars(ctx, width, height);
       if (!world) return;
 
-      const hull = boxRect(world.hull, world, width, height);
+      const shown = frames[index];
+      const hullPose = stationPose(shown, world);
+      const dockPose = portPose(shown, world);
+      (shown?.asteroids ?? []).forEach((rock) => {
+        ctx.beginPath();
+        ctx.arc(
+          wx(rock.x, world, width),
+          wy(rock.y, world, height),
+          Math.max(4, (rock.r / (world.x_max - world.x_min)) * width),
+          0,
+          Math.PI * 2,
+        );
+        ctx.fillStyle = "#968872";
+        ctx.fill();
+      });
+
+      drawApproachOverlays(ctx, world, shown, width, height);
       const hullSelected = selection?.kind === "station";
-      roundBox(ctx, hull, 6, "#2a3344", hullSelected ? "#f3f1ea" : "#8b93a3", hullSelected ? 2.5 : 1.5);
+      drawPose(ctx, hullPose, world, width, height, "#2a3344", hullSelected ? "#f3f1ea" : "#8b93a3", hullSelected ? 2.5 : 1.5);
       ctx.fillStyle = "#d8deea";
       ctx.font = "600 11px 'IBM Plex Sans', sans-serif";
       ctx.textAlign = "center";
-      ctx.textBaseline = "alphabetic";
-      const hullCenterX = wx(world.hull.cx, world, width);
-      ctx.fillText("STATION", hullCenterX, hull.y + hull.h * 0.42);
-      ctx.fillStyle = "#e85d4c";
-      ctx.font = "10px 'IBM Plex Sans', sans-serif";
-      ctx.fillText("collision", hullCenterX, hull.y + hull.h * 0.72);
+      ctx.textBaseline = "middle";
+      ctx.fillText("STATION", wx(hullPose.cx, world, width), wy(hullPose.cy, world, height));
+      if (shown?.hit_hull) {
+        ctx.fillStyle = "#e85d4c";
+        ctx.font = "10px 'IBM Plex Sans', sans-serif";
+        ctx.fillText("collision", wx(hullPose.cx, world, width), wy(hullPose.cy, world, height) + 14);
+      }
 
-      const port = boxRect(world.port, world, width, height);
       const portSelected = selection?.kind === "port";
-      roundBox(
+      drawPose(
         ctx,
-        port,
-        3,
+        dockPose,
+        world,
+        width,
+        height,
         "rgba(62, 224, 197, 0.18)",
         portSelected ? "#f3f1ea" : "#3ee0c5",
         portSelected ? 2.5 : 1.5,
       );
       const speedLimit = world.dock_speed_max ?? 0.35;
       const angleLimit = world.dock_angle_max_deg ?? 12;
+      const portLabelX = wx(dockPose.cx, world, width);
+      const portLabelY = wy(dockPose.cy, world, height);
       ctx.fillStyle = "#3ee0c5";
       ctx.font = "600 11px 'IBM Plex Sans', sans-serif";
-      ctx.fillText("PORT", wx(world.port.cx, world, width), port.y + port.h + 14);
+      ctx.fillText("PORT", portLabelX, portLabelY + 22);
       ctx.font = "10px 'IBM Plex Sans', sans-serif";
       ctx.fillStyle = "#8b93a3";
       ctx.fillText(
         `speed \u2264 ${speedLimit}  \u00b7  \u00b1${Math.round(angleLimit)}\u00b0`,
-        wx(world.port.cx, world, width),
-        port.y + port.h + 28,
+        portLabelX,
+        portLabelY + 36,
       );
 
-      if (ghost && ghost.length > 1) {
-        const ghostEnd = Math.min(index, ghost.length - 1);
-        const ghostTrail = ghost.slice(0, ghostEnd + 1);
+      (ghosts ?? []).forEach((ghost) => {
+        if (ghost.frames.length < 2) return;
+        const ghostEnd = Math.min(index, ghost.frames.length - 1);
+        const ghostTrail = ghost.frames.slice(0, ghostEnd + 1);
         ctx.beginPath();
         ghostTrail.forEach((frame, i) => {
           const x = wx(frame.x, world, width);
@@ -254,12 +504,14 @@ export function SimCanvas({ world, frames, index, ghost, selection, onSelect }: 
           if (i === 0) ctx.moveTo(x, y);
           else ctx.lineTo(x, y);
         });
-        ctx.strokeStyle = "rgba(126, 182, 255, 0.85)";
+        ctx.strokeStyle = ghost.color;
         ctx.lineWidth = 1.5;
         ctx.setLineDash([5, 4]);
         ctx.stroke();
         ctx.setLineDash([]);
-      }
+        const ghostFrame = ghost.frames[ghostEnd];
+        if (ghostFrame) drawShipMark(ctx, ghostFrame, world, width, height, ghost.color, ghost.color);
+      });
 
       const trail = frames.slice(Math.max(0, index - 80), index + 1);
       if (trail.length > 1) {
@@ -287,7 +539,7 @@ export function SimCanvas({ world, frames, index, ghost, selection, onSelect }: 
 
       const frame = frames[index];
       if (!frame) {
-        drawLegend(ctx);
+        drawLegend(ctx, false);
         return;
       }
       const x = wx(frame.x, world, width);
@@ -358,14 +610,15 @@ export function SimCanvas({ world, frames, index, ghost, selection, onSelect }: 
         ctx.stroke();
       }
 
-      drawLegend(ctx);
+      drawRelativeInset(ctx, world, frames, index, width, height);
+      drawLegend(ctx, (frame.asteroids?.length ?? 0) > 0);
     };
 
     render();
     const observer = new ResizeObserver(render);
     observer.observe(parent);
     return () => observer.disconnect();
-  }, [world, frames, index, ghost, selection]);
+  }, [world, frames, index, ghosts, selection]);
 
   const pick = (event: MouseEvent<HTMLCanvasElement>) => {
     const canvas = event.currentTarget;

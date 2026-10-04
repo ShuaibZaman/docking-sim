@@ -1,4 +1,12 @@
-from docking_sim.env.physics import ShipState, WorldConfig, step_ship
+from docking_sim.env.physics import (
+    ShipState,
+    StationPose,
+    WorldConfig,
+    docking_success,
+    step_ship,
+    swept_hits_asteroids,
+    swept_hits_hull,
+)
 
 
 def _still(theta: float = 0.0, fuel: float = 100.0) -> ShipState:
@@ -63,3 +71,49 @@ def test_empty_fuel_ignores_commands():
     assert nxt.vy == state.vy
     assert nxt.omega == state.omega
     assert nxt.fuel == 0.0
+
+
+def test_moving_target_requires_relative_capture_speed():
+    cfg = WorldConfig()
+    pose = StationPose(vx=0.4)
+    co_moving = ShipState(
+        x=cfg.port_cx,
+        y=cfg.port_cy,
+        vx=0.4,
+        vy=0.0,
+        theta=cfg.port_approach_angle,
+        omega=0.0,
+        fuel=100.0,
+    )
+    stationary = ShipState(
+        x=cfg.port_cx,
+        y=cfg.port_cy,
+        vx=0.0,
+        vy=0.0,
+        theta=cfg.port_approach_angle,
+        omega=0.0,
+        fuel=100.0,
+    )
+    assert docking_success(co_moving, cfg, pose)
+    assert not docking_success(stationary, cfg, pose)
+
+
+def test_swept_collisions_catch_tunnelling_between_endpoints():
+    cfg = WorldConfig()
+    start = ShipState(x=-3.0, y=cfg.hull_cy, vx=0, vy=0, theta=0, omega=0, fuel=100)
+    end = ShipState(x=3.0, y=cfg.hull_cy, vx=0, vy=0, theta=0, omega=0, fuel=100)
+    assert swept_hits_hull(start, end, cfg)
+    assert swept_hits_asteroids(start, end, [(0.0, cfg.hull_cy, 0.4)], cfg.ship_radius)
+
+
+def test_orbital_relative_mode_adds_hill_dynamics():
+    state = ShipState(x=3.0, y=0.0, vx=0.0, vy=0.0, theta=0.0, omega=0.0, fuel=100.0)
+    inertial, _ = step_ship(state, 0.0, 0.0, 0.0, WorldConfig(dt=0.1))
+    orbital, _ = step_ship(
+        state,
+        0.0,
+        0.0,
+        0.0,
+        WorldConfig(dt=0.1, dynamics_mode="orbital_relative", orbital_mean_motion=0.5),
+    )
+    assert orbital.vx > inertial.vx

@@ -1,6 +1,6 @@
 # AI Spacecraft Docking Lab
 
-2D docking simulator, PPO training, and a replay dashboard. Same seed, different checkpoints — watch the approach change.
+2D docking simulator, multi-algorithm RL training, and a comparison dashboard. Benchmarks compare **shared missions**. Custom seeds stay in a separate Explore tab.
 
 You need **two processes**: a FastAPI replay server (port **8000**) and the Vite UI (port **5173**).
 
@@ -23,7 +23,7 @@ npm install
 cd ..
 ```
 
-A short smoke run already exists under `artifacts/runs/` after the first training pass. If you have no runs yet, start the app anyway (Random policy works) or train first — see below.
+A short smoke run already exists under `artifacts/runs/` after the first training pass. If you have no runs yet, start the app anyway (Random policy and the PD baseline work) or train first — see below.
 
 ## Start
 
@@ -46,9 +46,15 @@ npm run dev
 
 Leave this running. You should see `Local: http://localhost:5173/`.
 
-Open [http://localhost:5173](http://localhost:5173). Pick a run, keep the seed fixed, hit **Play**, and switch **Random → checkpoints** to compare the same starting condition.
+Open [http://localhost:5173](http://localhost:5173). The lab has three surfaces:
 
-Do not close those terminals while you use the lab. Closing them (or Ctrl+C) stops the servers.
+**Leaderboard** ranks compatible trained runs on the selected suite. Success is better when higher. Crash rate, fuel on success, and time on success are better when lower. Each success rate includes its stored confidence interval. Learning curves and stratum or terminal-reason breakdowns use the scores already written to `eval.jsonl`. Pinning PD or Random does not invent a ranking: deltas against that baseline appear only after it has stored scores.
+
+**Mission** compares two to four candidates on one shared mission. The viewports stay in front; suite, stratum, and checkpoint controls sit in the side column. A status strip keeps the suite, mission, stratum, playback, and outcome visible. Each panel has its own scene, capture gates, and trajectory, attitude, and propulsion readouts. The approach corridor, capture box, hull keep-out, and target-frame inset are drawn on the canvas. Space plays or pauses, the arrow keys scrub, and 1–4 highlight a panel. Checkpoints stay explicit. Incompatible contracts stay collapsed. **Export JSON** saves the exact replay bundle. The address bar keeps the suite, mission, and candidate checkpoints, so a reload restores the same comparison.
+
+**Explore** is a custom-seed sandbox for a single run. It uses the same scene overlays and telemetry, and it is kept off the leaderboard because a typed seed is not a persisted shared mission.
+
+Use **Quick 20** while iterating and **Canonical 100** for a portfolio comparison. Showcase presets (`straight-in`, `lateral-offset`, `drifting`, `precision`) jump to named missions.
 
 ## Stop
 
@@ -76,7 +82,13 @@ Get-NetTCPConnection -LocalPort 8000,5173 -ErrorAction SilentlyContinue |
 
 Then start again with the two commands in **Start**.
 
-To stop a **training** run, focus that terminal and press **Ctrl+C**. Partial checkpoints that already flushed to `artifacts/runs/<run_id>/checkpoints/` stay on disk.
+To stop a **training** run, focus that terminal and press **Ctrl+C**. Partial checkpoints that already flushed to `artifacts/runs/<run_id>/checkpoints/` stay on disk. Resume with the original config:
+
+```powershell
+.\.venv\Scripts\python.exe -m docking_sim.training.train --config configs\ppo_64.yaml --resume <run_id> --additional-timesteps 20000
+```
+
+Resume refuses a different config or scene contract.
 
 ## Train (optional)
 
@@ -92,6 +104,17 @@ Default static-station PPO (~200k steps, not overnight):
 
 ```powershell
 .\.venv\Scripts\python.exe -m docking_sim.training.train --config configs\ppo_mlp_static.yaml
+```
+
+Opt-in robustness and orbital-relative experiments (do not start these unless you intend to train):
+
+- `configs/ppo_64_constrained.yaml` — safety-constrained reward
+- `configs/ppo_64_actuator.yaml` — actuator lag, scale uncertainty, persistent wind
+- `configs/ppo_64_sensors.yaml` — noisy, delayed observations
+- `configs/ppo_orbital.yaml` — Hill/Clohessy–Wiltshire relative dynamics
+
+```powershell
+.\.venv\Scripts\python.exe -m docking_sim.training.sweep --suite robustness --dry-run
 ```
 
 Runs land in `artifacts/runs/<timestamp>_<name>/`. Refresh the dashboard (or restart the API if a run appeared while it was already up — a refresh is enough; the API reads the folder on each request).

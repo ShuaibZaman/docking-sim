@@ -43,6 +43,24 @@ class WorldConfig:
     dock_angle_max: float = 0.21
     linear_damping: float = 0.0
     angular_damping: float = 0.04
+    station_omega: float = 0.0
+    station_vx: float = 0.0
+    station_vy: float = 0.0
+    station_margin: float = 2.5
+    disturbance_std: float = 0.0
+    disturbance_persistence: float = 0.0
+    disturbance_bias_std: float = 0.0
+    n_asteroids: int = 0
+    asteroid_radius: float = 0.45
+    actuator_lag_s: float = 0.0
+    actuator_scale_std: float = 0.0
+    sensor_position_std: float = 0.0
+    sensor_velocity_std: float = 0.0
+    sensor_heading_std: float = 0.0
+    sensor_delay_steps: int = 0
+    dynamics_mode: str = "inertial"
+    orbital_mean_motion: float = 0.0
+    world_scale_m: float = 1.0
 
 
 @dataclass
@@ -54,6 +72,103 @@ class ShipState:
     theta: float
     omega: float
     fuel: float
+
+
+@dataclass
+class StationPose:
+    """Offset and spin of the station relative to its home pose.
+
+    x and y are added to the home hull center. theta rotates the hull and the
+    port around that center. vx and vy are the translation rates.
+    """
+
+    x: float = 0.0
+    y: float = 0.0
+    theta: float = 0.0
+    vx: float = 0.0
+    vy: float = 0.0
+
+
+def idle_pose(pose: StationPose | None) -> bool:
+    if pose is None:
+        return True
+    return (
+        pose.x == 0.0
+        and pose.y == 0.0
+        and pose.theta == 0.0
+        and pose.vx == 0.0
+        and pose.vy == 0.0
+    )
+
+
+def station_center(cfg: WorldConfig, pose: StationPose | None = None) -> tuple[float, float]:
+    pose = pose or StationPose()
+    return cfg.hull_cx + pose.x, cfg.hull_cy + pose.y
+
+
+def port_world_center(cfg: WorldConfig, pose: StationPose | None = None) -> tuple[float, float]:
+    pose = pose or StationPose()
+    if idle_pose(pose):
+        return cfg.port_cx, cfg.port_cy
+    local_x = cfg.port_cx - cfg.hull_cx
+    local_y = cfg.port_cy - cfg.hull_cy
+    cos_t = float(np.cos(pose.theta))
+    sin_t = float(np.sin(pose.theta))
+    rotated_x = cos_t * local_x - sin_t * local_y
+    rotated_y = sin_t * local_x + cos_t * local_y
+    center_x, center_y = station_center(cfg, pose)
+    return center_x + rotated_x, center_y + rotated_y
+
+
+def port_velocity(cfg: WorldConfig, pose: StationPose | None = None) -> tuple[float, float]:
+    pose = pose or StationPose()
+    local_x = cfg.port_cx - cfg.hull_cx
+    local_y = cfg.port_cy - cfg.hull_cy
+    cos_t = float(np.cos(pose.theta))
+    sin_t = float(np.sin(pose.theta))
+    rotated_y = sin_t * local_x + cos_t * local_y
+    spin = cfg.station_omega
+    return pose.vx - spin * rotated_y, pose.vy + spin * (cos_t * local_x - sin_t * local_y)
+
+
+def approach_angle(cfg: WorldConfig, pose: StationPose | None = None) -> float:
+    pose = pose or StationPose()
+    return wrap_angle(cfg.port_approach_angle + pose.theta)
+
+
+def to_station_local(
+    x: float,
+    y: float,
+    cfg: WorldConfig,
+    pose: StationPose | None = None,
+) -> tuple[float, float]:
+    pose = pose or StationPose()
+    center_x, center_y = station_center(cfg, pose)
+    dx = x - center_x
+    dy = y - center_y
+    cos_t = float(np.cos(pose.theta))
+    sin_t = float(np.sin(pose.theta))
+    return cos_t * dx + sin_t * dy, -sin_t * dx + cos_t * dy
+
+
+def step_station(pose: StationPose, cfg: WorldConfig) -> StationPose:
+    theta = wrap_angle(pose.theta + cfg.station_omega * cfg.dt)
+    vx, vy = pose.vx, pose.vy
+    x = pose.x + vx * cfg.dt
+    y = pose.y + vy * cfg.dt
+    center_x = cfg.hull_cx + x
+    center_y = cfg.hull_cy + y
+    lo_x = cfg.x_min + cfg.station_margin
+    hi_x = cfg.x_max - cfg.station_margin
+    lo_y = cfg.y_min + cfg.station_margin
+    hi_y = cfg.y_max - cfg.station_margin
+    if center_x < lo_x or center_x > hi_x:
+        vx = -vx
+        x = pose.x + vx * cfg.dt
+    if center_y < lo_y or center_y > hi_y:
+        vy = -vy
+        y = pose.y + vy * cfg.dt
+    return StationPose(x=x, y=y, theta=theta, vx=vx, vy=vy)
 
 
 def hull_aabb(cfg: WorldConfig) -> tuple[float, float, float, float]:
@@ -109,22 +224,215 @@ def out_of_bounds(state: ShipState, cfg: WorldConfig) -> bool:
     )
 
 
-def hits_hull(state: ShipState, cfg: WorldConfig) -> bool:
-    xmin, ymin, xmax, ymax = hull_aabb(cfg)
-    return circle_aabb_overlap(state.x, state.y, cfg.ship_radius, xmin, ymin, xmax, ymax)
+def hits_hull(state: ShipState, cfg: WorldConfig, pose: StationPose | None = None) -> bool:
+    if idle_pose(pose):
+        xmin, ymin, xmax, ymax = hull_aabb(cfg)
+        return circle_aabb_overlap(state.x, state.y, cfg.ship_radius, xmin, ymin, xmax, ymax)
+    local_x, local_y = to_station_local(state.x, state.y, cfg, pose)
+    half_w = cfg.hull_w / 2.0
+    half_h = cfg.hull_h / 2.0
+    return circle_aabb_overlap(local_x, local_y, cfg.ship_radius, -half_w, -half_h, half_w, half_h)
 
 
-def in_port_zone(state: ShipState, cfg: WorldConfig) -> bool:
-    xmin, ymin, xmax, ymax = port_aabb(cfg)
-    return point_in_aabb(state.x, state.y, xmin, ymin, xmax, ymax)
+def in_port_zone(state: ShipState, cfg: WorldConfig, pose: StationPose | None = None) -> bool:
+    if idle_pose(pose):
+        xmin, ymin, xmax, ymax = port_aabb(cfg)
+        return point_in_aabb(state.x, state.y, xmin, ymin, xmax, ymax)
+    local_x, local_y = to_station_local(state.x, state.y, cfg, pose)
+    center_x = cfg.port_cx - cfg.hull_cx
+    center_y = cfg.port_cy - cfg.hull_cy
+    half_w = cfg.port_w / 2.0
+    half_h = cfg.port_h / 2.0
+    return point_in_aabb(
+        local_x,
+        local_y,
+        center_x - half_w,
+        center_y - half_h,
+        center_x + half_w,
+        center_y + half_h,
+    )
 
 
-def docking_success(state: ShipState, cfg: WorldConfig) -> bool:
-    if not in_port_zone(state, cfg):
+def docking_success(state: ShipState, cfg: WorldConfig, pose: StationPose | None = None) -> bool:
+    if not in_port_zone(state, cfg, pose):
         return False
-    speed = float(np.hypot(state.vx, state.vy))
-    heading_err = abs(angle_diff(state.theta, cfg.port_approach_angle))
+    speed = target_relative_speed(state, cfg, pose)
+    heading_err = abs(angle_diff(state.theta, approach_angle(cfg, pose)))
     return speed <= cfg.dock_speed_max and heading_err <= cfg.dock_angle_max
+
+
+def target_relative_velocity(
+    state: ShipState,
+    cfg: WorldConfig,
+    pose: StationPose | None = None,
+) -> tuple[float, float]:
+    target_vx, target_vy = port_velocity(cfg, pose)
+    return state.vx - target_vx, state.vy - target_vy
+
+
+def target_relative_speed(
+    state: ShipState,
+    cfg: WorldConfig,
+    pose: StationPose | None = None,
+) -> float:
+    rel_vx, rel_vy = target_relative_velocity(state, cfg, pose)
+    return float(np.hypot(rel_vx, rel_vy))
+
+
+def hits_asteroid(
+    state: ShipState,
+    asteroids: list[tuple[float, float, float]],
+    ship_radius: float,
+) -> bool:
+    for rock_x, rock_y, radius in asteroids:
+        dx = state.x - rock_x
+        dy = state.y - rock_y
+        limit = ship_radius + radius
+        if dx * dx + dy * dy <= limit * limit:
+            return True
+    return False
+
+
+def _segment_circle_overlap(
+    start_x: float,
+    start_y: float,
+    end_x: float,
+    end_y: float,
+    circle_x: float,
+    circle_y: float,
+    radius: float,
+) -> bool:
+    dx = end_x - start_x
+    dy = end_y - start_y
+    length_sq = dx * dx + dy * dy
+    if length_sq <= 1e-12:
+        return (start_x - circle_x) ** 2 + (start_y - circle_y) ** 2 <= radius * radius
+    t = ((circle_x - start_x) * dx + (circle_y - start_y) * dy) / length_sq
+    t = float(np.clip(t, 0.0, 1.0))
+    closest_x = start_x + t * dx
+    closest_y = start_y + t * dy
+    return (closest_x - circle_x) ** 2 + (closest_y - circle_y) ** 2 <= radius * radius
+
+
+def _segment_aabb_overlap(
+    start_x: float,
+    start_y: float,
+    end_x: float,
+    end_y: float,
+    xmin: float,
+    ymin: float,
+    xmax: float,
+    ymax: float,
+) -> bool:
+    """Liang-Barsky segment clipping against an already expanded box."""
+    dx = end_x - start_x
+    dy = end_y - start_y
+    lower, upper = 0.0, 1.0
+    for p, q in (
+        (-dx, start_x - xmin),
+        (dx, xmax - start_x),
+        (-dy, start_y - ymin),
+        (dy, ymax - start_y),
+    ):
+        if abs(p) <= 1e-12:
+            if q < 0.0:
+                return False
+            continue
+        ratio = q / p
+        if p < 0.0:
+            lower = max(lower, ratio)
+        else:
+            upper = min(upper, ratio)
+        if lower > upper:
+            return False
+    return True
+
+
+def _interpolate_pose(start: StationPose, end: StationPose, fraction: float) -> StationPose:
+    return StationPose(
+        x=start.x + (end.x - start.x) * fraction,
+        y=start.y + (end.y - start.y) * fraction,
+        theta=wrap_angle(start.theta + angle_diff(end.theta, start.theta) * fraction),
+        vx=start.vx + (end.vx - start.vx) * fraction,
+        vy=start.vy + (end.vy - start.vy) * fraction,
+    )
+
+
+def swept_hits_hull(
+    previous: ShipState,
+    current: ShipState,
+    cfg: WorldConfig,
+    previous_pose: StationPose | None = None,
+    current_pose: StationPose | None = None,
+) -> bool:
+    """Detect contact anywhere along a simulation step.
+
+    Stationary hulls use exact segment-vs-expanded-AABB intersection. Moving
+    or rotating hulls use a conservative temporal sweep whose sampling density
+    scales with relative motion; this prevents a ship crossing a thin hull
+    between endpoints.
+    """
+    start_pose = previous_pose or StationPose()
+    end_pose = current_pose or start_pose
+    if (
+        start_pose.x == end_pose.x
+        and start_pose.y == end_pose.y
+        and start_pose.theta == end_pose.theta
+    ):
+        start_x, start_y = to_station_local(previous.x, previous.y, cfg, start_pose)
+        end_x, end_y = to_station_local(current.x, current.y, cfg, end_pose)
+        return _segment_aabb_overlap(
+            start_x,
+            start_y,
+            end_x,
+            end_y,
+            -cfg.hull_w / 2.0 - cfg.ship_radius,
+            -cfg.hull_h / 2.0 - cfg.ship_radius,
+            cfg.hull_w / 2.0 + cfg.ship_radius,
+            cfg.hull_h / 2.0 + cfg.ship_radius,
+        )
+
+    ship_motion = float(np.hypot(current.x - previous.x, current.y - previous.y))
+    station_motion = float(np.hypot(end_pose.x - start_pose.x, end_pose.y - start_pose.y))
+    rotation_motion = abs(angle_diff(end_pose.theta, start_pose.theta)) * float(
+        np.hypot(cfg.hull_w / 2.0, cfg.hull_h / 2.0)
+    )
+    stride = max(cfg.ship_radius * 0.5, 0.025)
+    samples = max(2, int(np.ceil((ship_motion + station_motion + rotation_motion) / stride)))
+    for index in range(samples + 1):
+        fraction = index / samples
+        probe = ShipState(
+            x=previous.x + (current.x - previous.x) * fraction,
+            y=previous.y + (current.y - previous.y) * fraction,
+            vx=0.0,
+            vy=0.0,
+            theta=0.0,
+            omega=0.0,
+            fuel=0.0,
+        )
+        if hits_hull(probe, cfg, _interpolate_pose(start_pose, end_pose, fraction)):
+            return True
+    return False
+
+
+def swept_hits_asteroids(
+    previous: ShipState,
+    current: ShipState,
+    asteroids: list[tuple[float, float, float]],
+    ship_radius: float,
+) -> bool:
+    for rock_x, rock_y, radius in asteroids:
+        if _segment_circle_overlap(
+            previous.x,
+            previous.y,
+            current.x,
+            current.y,
+            rock_x,
+            rock_y,
+            ship_radius + radius,
+        ):
+            return True
+    return False
 
 
 def step_ship(
@@ -133,6 +441,7 @@ def step_ship(
     lateral_cmd: float,
     yaw_cmd: float,
     cfg: WorldConfig,
+    disturbance: tuple[float, float] = (0.0, 0.0),
 ) -> tuple[ShipState, float]:
     """Semi-implicit Euler.
 
@@ -161,8 +470,13 @@ def step_ship(
     torque = yaw_cmd * cfg.torque_max
     cos_t = float(np.cos(state.theta))
     sin_t = float(np.sin(state.theta))
-    ax = (axial * cos_t - lateral * sin_t) / cfg.mass
-    ay = (axial * sin_t + lateral * cos_t) / cfg.mass
+    ax = (axial * cos_t - lateral * sin_t) / cfg.mass + float(disturbance[0])
+    ay = (axial * sin_t + lateral * cos_t) / cfg.mass + float(disturbance[1])
+    if cfg.dynamics_mode == "orbital_relative" and cfg.orbital_mean_motion:
+        mean_motion = float(cfg.orbital_mean_motion)
+        # Linearized Hill/Clohessy-Wiltshire terms in the local orbital frame.
+        ax += 2.0 * mean_motion * state.vy + 3.0 * mean_motion * mean_motion * state.x
+        ay -= 2.0 * mean_motion * state.vx
     alpha = torque / cfg.inertia
 
     vx = state.vx + ax * cfg.dt

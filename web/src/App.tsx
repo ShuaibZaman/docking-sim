@@ -1,13 +1,31 @@
 import { useEffect, useState } from "react";
-import { fetchCheckpoints, fetchEval, fetchMetrics, fetchReplay, fetchRuns } from "./api";
+import {
+  fetchCheckpoints,
+  fetchEval,
+  fetchMetrics,
+  fetchReplay,
+  fetchRuns,
+} from "./api";
 import { SimCanvas } from "./SimCanvas";
-import type { Checkpoint, EvalSummary, Frame, Metrics, Replay, RunSummary, Selection, World } from "./types";
+import type {
+  Checkpoint,
+  EvalPoint,
+  EvalSummary,
+  Frame,
+  Metrics,
+  PoseBox,
+  Replay,
+  RunSummary,
+  Selection,
+  World,
+} from "./types";
 import "./App.css";
 
 const RANDOM_CKPT: Checkpoint = { id: "random", label: "Random policy", steps: 0, path: null };
 const SPEEDS = [1, 2, 4, 8] as const;
 
-function formatArch(arch: number[] | undefined): string {
+function formatArch(arch: number[] | undefined, label?: string): string {
+  if (label) return label;
   if (!arch || arch.length === 0) return "MLP 64-64";
   return `MLP ${arch.join("-")}`;
 }
@@ -36,20 +54,42 @@ function epochTitle(ck: Checkpoint): string {
   return `${ck.steps} steps`;
 }
 
+function formatFamily(family: string): string {
+  if (family.includes("distance")) return "PPO 64 distance";
+  if (family.startsWith("sac")) return "SAC 64";
+  if (family.startsWith("td3")) return "TD3 64";
+  if (family.startsWith("ddpg")) return "DDPG 64";
+  if (family.includes("residual")) return "Residual MLP";
+  if (family.includes("deeper")) return "PPO 128-128-64-32";
+  if (family.includes("ppo_32")) return "PPO 32-32";
+  if (family.includes("huber")) return "PPO Huber";
+  if (family.includes("smooth")) return "PPO Smooth L1";
+  if (family.includes("adamw")) return "PPO AdamW";
+  if (family.includes("sgd")) return "PPO SGD";
+  if (family.includes("cnn") || family.includes("pixel")) return "CNN pixels";
+  if (family.includes("level2")) return "Level 2 spawn";
+  if (family.includes("level3")) return "Level 3 velocity";
+  if (family.includes("level4")) return "Level 4 rotate";
+  if (family.includes("level5")) return "Level 5 wind";
+  if (family.includes("level6")) return "Level 6 fuel";
+  if (family.includes("level7")) return "Level 7 asteroids";
+  if (family.includes("level8")) return "Level 8 moving";
+  if (family.includes("wide")) return "PPO wide";
+  if (family.includes("deep")) return "PPO deep";
+  if (family.includes("ppo_64")) return "PPO 64";
+  return family.replace(/_/g, " ");
+}
+
 function formatRunLabel(run: RunSummary): string {
   const family = run.family || (run.config_name || run.id).replace(/\.yaml$/i, "");
   const seed = Number.isFinite(run.seed) ? ` · seed ${run.seed}` : "";
   if (run.legacy || family === "ppo_mlp_static") return `Legacy 2-action${seed}`;
-  if (family.includes("distance")) return `PPO 64 distance${seed}`;
-  if (family.startsWith("sac")) return `SAC 64${seed}`;
-  if (family.includes("wide")) return `PPO wide${seed}`;
-  if (family.includes("deep")) return `PPO deep${seed}`;
   if (family.includes("smoke")) return `Smoke MLP${seed}`;
-  if (family.includes("ppo_64")) return `PPO 64${seed}`;
-  return `${family.replace(/_/g, " ")}${seed}`;
+  return `${formatFamily(family)}${seed}`;
 }
 
 const CURVE_COLORS = ["#e8a54b", "#3ee0c5", "#7eb6ff", "#d38bff"];
+const BATTLE_COLORS = ["#7eb6ff", "#d38bff", "#3ee0c5", "#e85d4c"];
 
 type CurvePoint = { x: number; y: number; low?: number; high?: number };
 
@@ -146,6 +186,8 @@ function toDeg(radians: number): number {
 function outcomeText(frame: Frame | undefined): { label: string; kind: string } {
   if (!frame) return { label: "idle", kind: "" };
   if (frame.success) return { label: "docked", kind: "success" };
+  if (frame.out_of_fuel) return { label: "out of fuel", kind: "crash" };
+  if (frame.hit_asteroid) return { label: "hit asteroid", kind: "crash" };
   if (frame.hit_hull) return { label: "hit station", kind: "crash" };
   if (frame.out_of_bounds) return { label: "left the map", kind: "crash" };
   if (frame.crash) return { label: "collision", kind: "crash" };
@@ -153,9 +195,56 @@ function outcomeText(frame: Frame | undefined): { label: string; kind: string } 
   return { label: "in flight", kind: "" };
 }
 
+function poseOr(
+  pose: PoseBox | undefined,
+  fallback: { cx: number; cy: number; w: number; h: number },
+): PoseBox {
+  return pose ?? { ...fallback, theta: 0 };
+}
+
 function insidePort(frame: Frame, world: World): boolean {
-  const { cx, cy, w, h } = world.port;
-  return frame.x >= cx - w / 2 && frame.x <= cx + w / 2 && frame.y >= cy - h / 2 && frame.y <= cy + h / 2;
+  const pose = poseOr(frame.port_pose, world.port);
+  const dx = frame.x - pose.cx;
+  const dy = frame.y - pose.cy;
+  const c = Math.cos(pose.theta);
+  const s = Math.sin(pose.theta);
+  const lx = c * dx + s * dy;
+  const ly = -s * dx + c * dy;
+  return Math.abs(lx) <= pose.w / 2 && Math.abs(ly) <= pose.h / 2;
+}
+
+function meanOf(values: Array<number | null | undefined>): number | null {
+  const present = values.filter((value): value is number => value != null);
+  if (!present.length) return null;
+  return present.reduce((sum, value) => sum + value, 0) / present.length;
+}
+
+function familyScores(runs: RunSummary[], evals: Record<string, EvalSummary>) {
+  const families = [...new Set(runs.filter((run) => !run.legacy && run.family).map((run) => run.family as string))];
+  return families.map((family) => {
+    const latest: EvalPoint[] = [];
+    for (const run of runs.filter((item) => item.family === family && !item.legacy)) {
+      const points = evals[run.id]?.points ?? [];
+      const point = points[points.length - 1];
+      if (point) latest.push(point);
+    }
+    return {
+      family,
+      success: meanOf(latest.map((point) => point.success_rate)),
+      fuel: meanOf(latest.map((point) => point.mean_fuel)),
+      time: meanOf(latest.map((point) => point.mean_time)),
+    };
+  });
+}
+
+function formatPercent(value: number | null): string {
+  if (value == null) return "—";
+  return `${(value * 100).toFixed(0)}%`;
+}
+
+function formatMeasure(value: number | null, digits = 1): string {
+  if (value == null) return "—";
+  return value.toFixed(digits);
 }
 
 function RewardBars({ frame }: { frame: Frame | undefined }) {
@@ -293,7 +382,7 @@ function Inspector({
     const rules = [
       ["Ship center inside the port", insidePort(frame, world)],
       [`Speed at most ${speedLimit}`, frame.speed <= speedLimit],
-      [`Heading within ${Math.round(angleLimit)}° of straight up`, toDeg(frame.heading_error) <= angleLimit],
+      [`Heading within ${Math.round(angleLimit)}° of the port`, toDeg(frame.heading_error) <= angleLimit],
     ] as const;
     return (
       <div className="rules">
@@ -363,8 +452,8 @@ export default function App() {
   const [selection, setSelection] = useState<Selection | null>(null);
   const [evals, setEvals] = useState<Record<string, EvalSummary>>({});
   const [compare, setCompare] = useState<string[]>([]);
-  const [ghostId, setGhostId] = useState("");
-  const [ghostFrames, setGhostFrames] = useState<Frame[]>([]);
+  const [battleIds, setBattleIds] = useState<string[]>([]);
+  const [battleFrames, setBattleFrames] = useState<Record<string, Frame[]>>({});
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -441,23 +530,27 @@ export default function App() {
   }, [playing, frames.length, dtMs, speed]);
 
   useEffect(() => {
-    if (!ghostId) {
-      setGhostFrames([]);
+    const ids = battleIds.filter((id) => id !== runId);
+    if (!ids.length) {
+      setBattleFrames({});
       return;
     }
     let cancelled = false;
     const currentSteps = checkpoints.find((item) => item.id === checkpoint)?.steps;
-    fetchCheckpoints(ghostId)
-      .then((ghostCheckpoints) => {
+    Promise.all(
+      ids.map(async (id) => {
+        const ghostCheckpoints = await fetchCheckpoints(id);
         const matched =
           currentSteps != null
             ? ghostCheckpoints.find((item) => item.id !== "random" && item.steps === currentSteps)
             : undefined;
         const ghostCheckpoint = matched?.id ?? (ghostCheckpoints.some((item) => item.id === "final") ? "final" : "random");
-        return fetchReplay({ run_id: ghostId, checkpoint: ghostCheckpoint, seed });
-      })
-      .then((data) => {
-        if (!cancelled) setGhostFrames(data.frames);
+        const data = await fetchReplay({ run_id: id, checkpoint: ghostCheckpoint, seed });
+        return [id, data.frames] as const;
+      }),
+    )
+      .then((pairs) => {
+        if (!cancelled) setBattleFrames(Object.fromEntries(pairs));
       })
       .catch((err: Error) => {
         if (!cancelled) setError(err.message);
@@ -465,7 +558,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [ghostId, seed, checkpoint, checkpoints]);
+  }, [battleIds, runId, seed, checkpoint, checkpoints]);
 
   const outcome = outcomeText(frame);
   const meta = replay?.meta ?? {};
@@ -479,6 +572,16 @@ export default function App() {
         ? selectedCheckpoint.steps
         : null;
   const families = [...new Set(runs.filter((run) => !run.legacy && run.family).map((run) => run.family as string))];
+  const scores = familyScores(runs, evals);
+  const battleGhosts = battleIds.flatMap((id, ghostIndex) => {
+    if (id === runId) return [];
+    return [
+      {
+        frames: battleFrames[id] ?? [],
+        color: BATTLE_COLORS[ghostIndex % BATTLE_COLORS.length],
+      },
+    ];
+  });
 
   const handleSelect = (next: Selection | null) => {
     setSelection(next);
@@ -538,7 +641,7 @@ export default function App() {
               world={replay?.world ?? null}
               frames={frames}
               index={index}
-              ghost={ghostFrames}
+              ghosts={battleGhosts}
               selection={selection}
               onSelect={handleSelect}
             />
@@ -555,7 +658,7 @@ export default function App() {
             </div>
             <div className="meta">
               <span className="k">Architecture</span>
-              <span className="v">{formatArch(meta.net_arch ?? selectedRun?.net_arch)}</span>
+              <span className="v">{formatArch(meta.net_arch ?? selectedRun?.net_arch, meta.architecture)}</span>
             </div>
             <div className="meta">
               <span className="k">Parameters</span>
@@ -565,6 +668,24 @@ export default function App() {
               <span className="k">Observation</span>
               <span className="v">{meta.obs_mode ?? selectedRun?.obs_mode ?? "state"}</span>
             </div>
+            {meta.critic_loss ? (
+              <div className="meta">
+                <span className="k">Loss</span>
+                <span className="v">{meta.critic_loss}</span>
+              </div>
+            ) : null}
+            {meta.optimizer ? (
+              <div className="meta">
+                <span className="k">Optimizer</span>
+                <span className="v">{meta.optimizer}</span>
+              </div>
+            ) : null}
+            {meta.level ? (
+              <div className="meta">
+                <span className="k">Level</span>
+                <span className="v">{meta.level}</span>
+              </div>
+            ) : null}
           </div>
 
           <h2>Approach</h2>
@@ -615,6 +736,33 @@ export default function App() {
             ]}
           />
 
+          <h2>Scoreboard</h2>
+          <p className="note">Latest held-out missions for each family. Fuel and time are means.</p>
+          {scores.length === 0 ? (
+            <p className="empty">Scores appear after a training run.</p>
+          ) : (
+            <table className="matrix">
+              <thead>
+                <tr>
+                  <th>Architecture</th>
+                  <th>Success</th>
+                  <th>Avg fuel</th>
+                  <th>Avg time</th>
+                </tr>
+              </thead>
+              <tbody>
+                {scores.map((row) => (
+                  <tr key={row.family}>
+                    <td>{formatFamily(row.family)}</td>
+                    <td>{formatPercent(row.success)}</td>
+                    <td>{formatMeasure(row.fuel)}</td>
+                    <td>{row.time == null ? "—" : `${row.time.toFixed(1)}s`}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+
           <h2>Compare</h2>
           <div className="compare">
             {families.map((family) => (
@@ -630,7 +778,7 @@ export default function App() {
                     });
                   }}
                 />
-                {family.replace(/_/g, " ")}
+                {formatFamily(family)}
               </label>
             ))}
           </div>
@@ -650,19 +798,53 @@ export default function App() {
               points: familyBand(runs, evals, family, "crash_rate"),
             }))}
           />
-          <label>
-            Ghost
-            <select value={ghostId} onChange={(event) => setGhostId(event.target.value)}>
-              <option value="">none</option>
-              {runs
-                .filter((run) => run.id !== runId && !run.legacy)
-                .map((run) => (
-                  <option key={run.id} value={run.id}>
-                    {formatRunLabel(run)}
-                  </option>
-                ))}
-            </select>
-          </label>
+          <h2>Battle</h2>
+          <p className="note">Same seed on the canvas. Marks are the shared held-out missions.</p>
+          <div className="compare">
+            {runs
+              .filter((run) => !run.legacy)
+              .map((run) => (
+                <label key={run.id}>
+                  <input
+                    type="checkbox"
+                    checked={battleIds.includes(run.id)}
+                    onChange={() => {
+                      setBattleIds((current) => {
+                        if (current.includes(run.id)) return current.filter((id) => id !== run.id);
+                        if (current.length >= 4) return current;
+                        return [...current, run.id];
+                      });
+                    }}
+                  />
+                  {formatRunLabel(run)}
+                </label>
+              ))}
+          </div>
+          {battleIds.map((id, battleIndex) => {
+            const outcomes = evals[id]?.latest_outcomes ?? [];
+            const color = BATTLE_COLORS[battleIndex % BATTLE_COLORS.length];
+            const battleRun = runs.find((run) => run.id === id);
+            return (
+              <div className="battle-row" key={id}>
+                <span className="battle-name" style={{ color }}>
+                  {battleRun ? formatRunLabel(battleRun) : id}
+                </span>
+                {outcomes.length === 0 ? (
+                  <span className="note">no held-out marks yet</span>
+                ) : (
+                  <div className="marks">
+                    {outcomes.map((item) => (
+                      <span
+                        key={item.seed}
+                        className={`mark ${item.success ? "ok" : "bad"}`}
+                        title={`seed ${item.seed}`}
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
 
           <h2>Reward</h2>
           <RewardBars frame={frame} />

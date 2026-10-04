@@ -2,7 +2,16 @@ from __future__ import annotations
 
 import numpy as np
 
-from docking_sim.env.physics import WorldConfig, hull_aabb, port_aabb, wrap_angle
+from docking_sim.env.physics import (
+    StationPose,
+    WorldConfig,
+    port_world_center,
+    station_center,
+    wrap_angle,
+)
+
+IMAGE_WIDTH = 160
+IMAGE_HEIGHT = 128
 
 
 def _world_to_px(x: float, y: float, cfg: WorldConfig, width: int, height: int) -> tuple[int, int]:
@@ -11,18 +20,6 @@ def _world_to_px(x: float, y: float, cfg: WorldConfig, width: int, height: int) 
     px = int(np.clip(u * (width - 1), 0, width - 1))
     py = int(np.clip((1.0 - v) * (height - 1), 0, height - 1))
     return px, py
-
-
-def _fill_rect(img: np.ndarray, x0: int, y0: int, x1: int, y1: int, color: tuple[int, int, int]) -> None:
-    h, w = img.shape[:2]
-    xa, xb = sorted((int(x0), int(x1)))
-    ya, yb = sorted((int(y0), int(y1)))
-    xa = max(0, xa)
-    ya = max(0, ya)
-    xb = min(w, xb + 1)
-    yb = min(h, yb + 1)
-    if xb > xa and yb > ya:
-        img[ya:yb, xa:xb] = color
 
 
 def _fill_circle(img: np.ndarray, cx: int, cy: int, radius: int, color: tuple[int, int, int]) -> None:
@@ -53,19 +50,53 @@ def _draw_line(
             img[y, x] = color
 
 
-def render_rgb(state, cfg: WorldConfig, width: int = 160, height: int = 128) -> np.ndarray:
+def _fill_rotated_rect(
+    img: np.ndarray,
+    cx: float,
+    cy: float,
+    width_world: float,
+    height_world: float,
+    theta: float,
+    color: tuple[int, int, int],
+    cfg: WorldConfig,
+    width: int,
+    height: int,
+) -> None:
+    ys, xs = np.ogrid[0:height, 0:width]
+    world_x = cfg.x_min + (xs + 0.5) / width * (cfg.x_max - cfg.x_min)
+    world_y = cfg.y_max - (ys + 0.5) / height * (cfg.y_max - cfg.y_min)
+    dx = world_x - cx
+    dy = world_y - cy
+    cos_t = float(np.cos(theta))
+    sin_t = float(np.sin(theta))
+    local_x = cos_t * dx + sin_t * dy
+    local_y = -sin_t * dx + cos_t * dy
+    mask = (np.abs(local_x) <= width_world / 2.0) & (np.abs(local_y) <= height_world / 2.0)
+    img[mask] = color
+
+
+def render_rgb(
+    state,
+    cfg: WorldConfig,
+    pose: StationPose | None = None,
+    asteroids: list[tuple[float, float, float]] | None = None,
+    width: int = IMAGE_WIDTH,
+    height: int = IMAGE_HEIGHT,
+) -> np.ndarray:
+    pose = pose or StationPose()
     img = np.zeros((height, width, 3), dtype=np.uint8)
     img[:] = (8, 10, 22)
 
-    hx0, hy0, hx1, hy1 = hull_aabb(cfg)
-    p0 = _world_to_px(hx0, hy1, cfg, width, height)
-    p1 = _world_to_px(hx1, hy0, cfg, width, height)
-    _fill_rect(img, p0[0], p0[1], p1[0], p1[1], (72, 82, 104))
+    for rock_x, rock_y, radius in asteroids or []:
+        sx, sy = _world_to_px(rock_x, rock_y, cfg, width, height)
+        scale = width / (cfg.x_max - cfg.x_min)
+        _fill_circle(img, sx, sy, max(2, int(radius * scale)), (150, 136, 112))
 
-    px0, py0, px1, py1 = port_aabb(cfg)
-    q0 = _world_to_px(px0, py1, cfg, width, height)
-    q1 = _world_to_px(px1, py0, cfg, width, height)
-    _fill_rect(img, q0[0], q0[1], q1[0], q1[1], (40, 170, 150))
+    hull_x, hull_y = station_center(cfg, pose)
+    _fill_rotated_rect(img, hull_x, hull_y, cfg.hull_w, cfg.hull_h, pose.theta, (72, 82, 104), cfg, width, height)
+
+    port_x, port_y = port_world_center(cfg, pose)
+    _fill_rotated_rect(img, port_x, port_y, cfg.port_w, cfg.port_h, pose.theta, (40, 170, 150), cfg, width, height)
 
     sx, sy = _world_to_px(state.x, state.y, cfg, width, height)
     scale = width / (cfg.x_max - cfg.x_min)

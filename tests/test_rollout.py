@@ -1,5 +1,7 @@
 import numpy as np
 
+from docking_sim.replay.benchmarks import get_benchmark, get_scenario
+from docking_sim.replay.controllers import list_baselines
 from docking_sim.replay.rollout import command_fields, policy_action_to_commands, rollout
 
 
@@ -60,3 +62,25 @@ def test_command_fields_fill_missing_pair_from_the_other():
 def test_three_action_policy_keeps_strafe_and_brake():
     commands = policy_action_to_commands(np.array([-0.4, 0.7, -0.2], dtype=np.float32))
     np.testing.assert_allclose(commands, [-0.4, 0.7, -0.2])
+
+
+def test_deterministic_controller_baseline_replays_exact_scenario():
+    suite = get_benchmark("quick-20")
+    scenario = get_scenario("quick-20", "static-v1-000")
+    a = rollout(
+        checkpoint="pd",
+        baseline="pd",
+        scenario=scenario,
+        env_kwargs_override=suite.env_kwargs,
+        max_steps=20,
+    )
+    b = rollout(
+        checkpoint="pd",
+        baseline="pd",
+        scenario=scenario,
+        env_kwargs_override=suite.env_kwargs,
+        max_steps=20,
+    )
+    assert {item["id"] for item in list_baselines()} == {"random", "pd"}
+    assert a["baseline"] == "pd"
+    assert [frame["x"] for frame in a["frames"]] == [frame["x"] for frame in b["frames"]]

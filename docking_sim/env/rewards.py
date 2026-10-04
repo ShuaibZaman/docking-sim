@@ -25,6 +25,7 @@ def _empty_components() -> dict[str, float]:
         "rotation": 0.0,
         "fuel": 0.0,
         "time": 0.0,
+        "safety": 0.0,
         "terminal": 0.0,
     }
 
@@ -64,8 +65,33 @@ def distance_only(ctx: RewardContext, weights: dict[str, float]) -> tuple[float,
     return float(sum(parts.values())), parts
 
 
+def constrained_docking(ctx: RewardContext, weights: dict[str, float]) -> tuple[float, dict[str, float]]:
+    """Progress reward with an explicit target-frame speed safety constraint."""
+    close_range = max(float(weights.get("close_range", 4.0)), 1e-6)
+    proximity = float(np.clip(1.0 - ctx.distance / close_range, 0.0, 1.0))
+    safety_speed = max(float(weights.get("safety_speed_max", 0.5)), 1e-6)
+    speed_excess = max(0.0, ctx.speed - safety_speed)
+    near = 0.1 + 0.9 * proximity
+
+    parts = _empty_components()
+    parts["distance"] = float(weights.get("distance", 1.0)) * (ctx.prev_distance - ctx.distance)
+    parts["velocity"] = -float(weights.get("velocity", 0.4)) * ctx.speed * near
+    parts["rotation"] = -float(weights.get("rotation", 0.35)) * ctx.heading_error * near
+    parts["fuel"] = -float(weights.get("fuel", 0.02)) * ctx.fuel_used
+    parts["time"] = -float(weights.get("time", 0.01))
+    parts["safety"] = -float(weights.get("safety_speed", 8.0)) * speed_excess * speed_excess
+    if ctx.success:
+        parts["terminal"] = float(weights.get("success", 120.0))
+    elif ctx.crash:
+        parts["terminal"] = -(
+            float(weights.get("crash", 80.0)) + float(weights.get("crash_speed", 15.0)) * ctx.speed
+        )
+    return float(sum(parts.values())), parts
+
+
 REWARD_FNS: dict[str, Callable[[RewardContext, dict[str, float]], tuple[float, dict[str, float]]]] = {
     "safe_docking": safe_docking,
+    "constrained_docking": constrained_docking,
     "distance_only": distance_only,
 }
 
@@ -80,6 +106,8 @@ DEFAULT_WEIGHTS: dict[str, float] = {
     "crash_speed": 15.0,
     "gate": 2.0,
     "close_range": 4.0,
+    "safety_speed_max": 0.5,
+    "safety_speed": 8.0,
 }
 
 
