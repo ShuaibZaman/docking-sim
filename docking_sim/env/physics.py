@@ -39,8 +39,9 @@ class WorldConfig:
     port_w: float = 1.0
     port_h: float = 0.8
     port_approach_angle: float = float(np.pi / 2.0)
-    dock_speed_max: float = 0.35
+    dock_speed_max: float = 0.08
     dock_angle_max: float = 0.21
+    dock_omega_max: float = 0.08
     linear_damping: float = 0.0
     angular_damping: float = 0.04
     station_omega: float = 0.0
@@ -61,6 +62,49 @@ class WorldConfig:
     dynamics_mode: str = "inertial"
     orbital_mean_motion: float = 0.0
     world_scale_m: float = 1.0
+    second_port: bool = False
+    port2_cx: float = 0.0
+    port2_cy: float = 8.05
+    port2_w: float = 1.0
+    port2_h: float = 0.8
+    port2_approach_angle: float = float(-np.pi / 2.0)
+    hold_steps: int = 20
+
+
+# A dock is a numerical stop. Looser values in older configs are tightened to these.
+CAPTURE_SPEED_MAX = 0.08
+CAPTURE_OMEGA_MAX = 0.08
+
+
+def clamp_capture_speed(value: float) -> float:
+    return min(float(value), CAPTURE_SPEED_MAX)
+
+
+def clamp_capture_omega(value: float) -> float:
+    return min(float(value), CAPTURE_OMEGA_MAX)
+
+
+@dataclass(frozen=True)
+class PortSpec:
+    cx: float
+    cy: float
+    w: float
+    h: float
+    approach: float
+
+
+def primary_port(cfg: WorldConfig) -> PortSpec:
+    return PortSpec(cfg.port_cx, cfg.port_cy, cfg.port_w, cfg.port_h, cfg.port_approach_angle)
+
+
+def port_list(cfg: WorldConfig) -> tuple[PortSpec, ...]:
+    primary = primary_port(cfg)
+    if not cfg.second_port:
+        return (primary,)
+    return (
+        primary,
+        PortSpec(cfg.port2_cx, cfg.port2_cy, cfg.port2_w, cfg.port2_h, cfg.port2_approach_angle),
+    )
 
 
 @dataclass
@@ -106,12 +150,17 @@ def station_center(cfg: WorldConfig, pose: StationPose | None = None) -> tuple[f
     return cfg.hull_cx + pose.x, cfg.hull_cy + pose.y
 
 
-def port_world_center(cfg: WorldConfig, pose: StationPose | None = None) -> tuple[float, float]:
+def port_world_center(
+    cfg: WorldConfig,
+    pose: StationPose | None = None,
+    port: PortSpec | None = None,
+) -> tuple[float, float]:
     pose = pose or StationPose()
-    if idle_pose(pose):
+    spec = port or primary_port(cfg)
+    if port is None and idle_pose(pose):
         return cfg.port_cx, cfg.port_cy
-    local_x = cfg.port_cx - cfg.hull_cx
-    local_y = cfg.port_cy - cfg.hull_cy
+    local_x = spec.cx - cfg.hull_cx
+    local_y = spec.cy - cfg.hull_cy
     cos_t = float(np.cos(pose.theta))
     sin_t = float(np.sin(pose.theta))
     rotated_x = cos_t * local_x - sin_t * local_y
@@ -120,10 +169,15 @@ def port_world_center(cfg: WorldConfig, pose: StationPose | None = None) -> tupl
     return center_x + rotated_x, center_y + rotated_y
 
 
-def port_velocity(cfg: WorldConfig, pose: StationPose | None = None) -> tuple[float, float]:
+def port_velocity(
+    cfg: WorldConfig,
+    pose: StationPose | None = None,
+    port: PortSpec | None = None,
+) -> tuple[float, float]:
     pose = pose or StationPose()
-    local_x = cfg.port_cx - cfg.hull_cx
-    local_y = cfg.port_cy - cfg.hull_cy
+    spec = port or primary_port(cfg)
+    local_x = spec.cx - cfg.hull_cx
+    local_y = spec.cy - cfg.hull_cy
     cos_t = float(np.cos(pose.theta))
     sin_t = float(np.sin(pose.theta))
     rotated_y = sin_t * local_x + cos_t * local_y
@@ -131,9 +185,14 @@ def port_velocity(cfg: WorldConfig, pose: StationPose | None = None) -> tuple[fl
     return pose.vx - spin * rotated_y, pose.vy + spin * (cos_t * local_x - sin_t * local_y)
 
 
-def approach_angle(cfg: WorldConfig, pose: StationPose | None = None) -> float:
+def approach_angle(
+    cfg: WorldConfig,
+    pose: StationPose | None = None,
+    port: PortSpec | None = None,
+) -> float:
     pose = pose or StationPose()
-    return wrap_angle(cfg.port_approach_angle + pose.theta)
+    spec = port or primary_port(cfg)
+    return wrap_angle(spec.approach + pose.theta)
 
 
 def to_station_local(
@@ -234,15 +293,21 @@ def hits_hull(state: ShipState, cfg: WorldConfig, pose: StationPose | None = Non
     return circle_aabb_overlap(local_x, local_y, cfg.ship_radius, -half_w, -half_h, half_w, half_h)
 
 
-def in_port_zone(state: ShipState, cfg: WorldConfig, pose: StationPose | None = None) -> bool:
-    if idle_pose(pose):
+def in_port_zone(
+    state: ShipState,
+    cfg: WorldConfig,
+    pose: StationPose | None = None,
+    port: PortSpec | None = None,
+) -> bool:
+    spec = port or primary_port(cfg)
+    if port is None and idle_pose(pose):
         xmin, ymin, xmax, ymax = port_aabb(cfg)
         return point_in_aabb(state.x, state.y, xmin, ymin, xmax, ymax)
     local_x, local_y = to_station_local(state.x, state.y, cfg, pose)
-    center_x = cfg.port_cx - cfg.hull_cx
-    center_y = cfg.port_cy - cfg.hull_cy
-    half_w = cfg.port_w / 2.0
-    half_h = cfg.port_h / 2.0
+    center_x = spec.cx - cfg.hull_cx
+    center_y = spec.cy - cfg.hull_cy
+    half_w = spec.w / 2.0
+    half_h = spec.h / 2.0
     return point_in_aabb(
         local_x,
         local_y,
@@ -253,20 +318,31 @@ def in_port_zone(state: ShipState, cfg: WorldConfig, pose: StationPose | None = 
     )
 
 
-def docking_success(state: ShipState, cfg: WorldConfig, pose: StationPose | None = None) -> bool:
-    if not in_port_zone(state, cfg, pose):
+def docking_success(
+    state: ShipState,
+    cfg: WorldConfig,
+    pose: StationPose | None = None,
+    port: PortSpec | None = None,
+) -> bool:
+    """In the port, nearly stopped in translation and spin, and facing the approach."""
+    if not in_port_zone(state, cfg, pose, port):
         return False
-    speed = target_relative_speed(state, cfg, pose)
-    heading_err = abs(angle_diff(state.theta, approach_angle(cfg, pose)))
-    return speed <= cfg.dock_speed_max and heading_err <= cfg.dock_angle_max
+    speed = target_relative_speed(state, cfg, pose, port)
+    heading_err = abs(angle_diff(state.theta, approach_angle(cfg, pose, port)))
+    return (
+        speed <= cfg.dock_speed_max
+        and abs(state.omega) <= cfg.dock_omega_max
+        and heading_err <= cfg.dock_angle_max
+    )
 
 
 def target_relative_velocity(
     state: ShipState,
     cfg: WorldConfig,
     pose: StationPose | None = None,
+    port: PortSpec | None = None,
 ) -> tuple[float, float]:
-    target_vx, target_vy = port_velocity(cfg, pose)
+    target_vx, target_vy = port_velocity(cfg, pose, port)
     return state.vx - target_vx, state.vy - target_vy
 
 
@@ -274,8 +350,9 @@ def target_relative_speed(
     state: ShipState,
     cfg: WorldConfig,
     pose: StationPose | None = None,
+    port: PortSpec | None = None,
 ) -> float:
-    rel_vx, rel_vy = target_relative_velocity(state, cfg, pose)
+    rel_vx, rel_vy = target_relative_velocity(state, cfg, pose, port)
     return float(np.hypot(rel_vx, rel_vy))
 
 

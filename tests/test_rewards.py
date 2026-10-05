@@ -31,6 +31,26 @@ def test_safe_docking_success_bonus():
     assert parts["terminal"] == 120.0
 
 
+def test_spin_costs_points_even_far_from_the_port():
+    weights = {
+        "distance": 0.0,
+        "velocity": 0.0,
+        "rotation": 0.0,
+        "fuel": 0.0,
+        "time": 0.0,
+        "gate": 0.0,
+        "spin": 1.0,
+    }
+    calm, calm_parts = safe_docking(_ctx(distance=10.0, prev_distance=10.0, speed=0.0, heading_error=0.0, omega=0.0), weights)
+    spinning, spinning_parts = safe_docking(
+        _ctx(distance=10.0, prev_distance=10.0, speed=0.0, heading_error=0.0, omega=2.0),
+        weights,
+    )
+    assert calm_parts["spin"] == 0.0
+    assert spinning_parts["spin"] == -2.0
+    assert spinning < calm
+
+
 def test_hovering_far_is_not_taxed_for_distance():
     weights = {
         "distance": 1.0,

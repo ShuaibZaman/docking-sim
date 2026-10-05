@@ -54,7 +54,11 @@ Open [http://localhost:5173](http://localhost:5173). The lab has three surfaces:
 
 **Explore** is a custom-seed sandbox for a single run. It uses the same scene overlays and telemetry, and it is kept off the leaderboard because a typed seed is not a persisted shared mission.
 
-Use **Quick 20** while iterating and **Canonical 100** for a portfolio comparison. Showcase presets (`straight-in`, `lateral-offset`, `drifting`, `precision`) jump to named missions.
+A dock counts only when the ship is inside the active port, nearly stopped (relative speed and spin at or below 0.08), and facing that port's approach. Spin costs reward on every step, including far from the station. The first capture of a two-port level is a one-second hold, then the target switches.
+
+Explore can preview levels 1–11 without training: close static, the existing curriculum, a long approach, corridor obstacles, a moving port, and the two-port transfer. The canvas fills the page. Model details and the plain-language capture reason sit in the side rail.
+
+Use **Quick 20** while iterating and **Canonical 100** for a portfolio comparison. Showcase presets (`straight-in`, `lateral-offset`, `drifting`, `precision`) jump to named missions. Mission comparison keeps previous and next for the shared list, one inspector for the highlighted panel, and stored curves behind Evidence.
 
 ## Stop
 

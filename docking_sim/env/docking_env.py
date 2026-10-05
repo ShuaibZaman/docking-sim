@@ -7,14 +7,18 @@ import numpy as np
 from gymnasium import spaces
 
 from docking_sim.env.physics import (
+    PortSpec,
     ShipState,
     StationPose,
     WorldConfig,
     approach_angle,
+    clamp_capture_omega,
+    clamp_capture_speed,
     docking_success,
     hits_asteroid,
     hits_hull,
     out_of_bounds,
+    port_list,
     port_velocity,
     port_world_center,
     station_center,
@@ -43,7 +47,7 @@ class DockingEnv(gym.Env):
         render_mode: str | None = None,
         max_steps: int = 800,
         dt: float = 0.05,
-        dock_speed_max: float = 0.35,
+        dock_speed_max: float = 0.08,
         dock_angle_max_deg: float = 12.0,
         fuel_capacity: float = 100.0,
         randomize_start: bool = False,
@@ -54,6 +58,10 @@ class DockingEnv(gym.Env):
         extended_obs: bool | None = None,
         fail_on_empty_fuel: bool = False,
         level: int | None = None,
+        start_x: float | None = None,
+        start_y: float | None = None,
+        start_theta: float | None = None,
+        corridor_obstacles: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__()
@@ -66,6 +74,10 @@ class DockingEnv(gym.Env):
             raise ValueError(f"Unknown obs_mode '{self.obs_mode}'. Expected state or pixels.")
         self.fail_on_empty_fuel = bool(fail_on_empty_fuel)
         self.level = None if level is None else int(level)
+        self.start_x = None if start_x is None else float(start_x)
+        self.start_y = None if start_y is None else float(start_y)
+        self.start_theta = None if start_theta is None else float(start_theta)
+        self.corridor_obstacles = bool(corridor_obstacles)
 
         cfg_fields = {f.name for f in WorldConfig.__dataclass_fields__.values()}
         physics_kwargs = {k: v for k, v in kwargs.items() if k in cfg_fields}
@@ -76,6 +88,9 @@ class DockingEnv(gym.Env):
             dock_angle_max=float(np.deg2rad(dock_angle_max_deg)),
             **physics_kwargs,
         )
+        self.cfg.dock_speed_max = clamp_capture_speed(self.cfg.dock_speed_max)
+        self.cfg.dock_omega_max = clamp_capture_omega(self.cfg.dock_omega_max)
+        self._ports = port_list(self.cfg)
         if extended_obs is None:
             self.extended_obs = bool(
                 self.cfg.station_omega
@@ -98,6 +113,8 @@ class DockingEnv(gym.Env):
             )
         else:
             dim = EXTENDED_OBS_DIM if self.extended_obs else BASE_OBS_DIM
+            if self.cfg.second_port:
+                dim += 1
             self.observation_space = spaces.Box(
                 low=-OBS_CLIP,
                 high=OBS_CLIP,
@@ -117,6 +134,9 @@ class DockingEnv(gym.Env):
         self._obs_history: list[np.ndarray] = []
         self._scenario_id: str | None = None
         self._scenario_hash: str | None = None
+        self._active_port = 0
+        self._hold = 0
+        self._phase = "approach"
         self._step_count = 0
         self._prev_distance = 0.0
         self._fuel_used_total = 0.0
@@ -124,11 +144,11 @@ class DockingEnv(gym.Env):
 
     def _default_state(self) -> ShipState:
         return ShipState(
-            x=0.0,
-            y=-5.0,
+            x=0.0 if self.start_x is None else self.start_x,
+            y=-5.0 if self.start_y is None else self.start_y,
             vx=0.0,
             vy=0.0,
-            theta=float(np.pi / 2.0),
+            theta=float(np.pi / 2.0) if self.start_theta is None else self.start_theta,
             omega=0.0,
             fuel=self.cfg.fuel_capacity,
         )
@@ -148,10 +168,35 @@ class DockingEnv(gym.Env):
     def _fresh_pose(self) -> StationPose:
         return StationPose(vx=float(self.cfg.station_vx), vy=float(self.cfg.station_vy))
 
+    def _port(self) -> PortSpec:
+        index = min(self._active_port, len(self._ports) - 1)
+        return self._ports[index]
+
+    def _phase_value(self) -> float:
+        return {"approach": 0.0, "hold": 0.5, "transfer": 1.0}.get(self._phase, 0.0)
+
+    def _corridor_rocks(self, count: int) -> list[tuple[float, float, float]]:
+        """Rocks beside the spawn-to-port line, leaving a passable gap."""
+        port_x, port_y = port_world_center(self.cfg, self._pose, self._port())
+        sx, sy = self._state.x, self._state.y
+        dx, dy = port_x - sx, port_y - sy
+        length = float(np.hypot(dx, dy)) or 1.0
+        ux, uy = dx / length, dy / length
+        px, py = -uy, ux
+        radius = float(self.cfg.asteroid_radius)
+        pattern = ((0.35, 1.0), (0.55, -1.0), (0.72, 1.0))
+        placed: list[tuple[float, float, float]] = []
+        for along, side in pattern[: max(count, 0)]:
+            offset = 0.95 * side
+            placed.append((sx + ux * length * along + px * offset, sy + uy * length * along + py * offset, radius))
+        return placed
+
     def _sample_asteroids(self) -> list[tuple[float, float, float]]:
         count = int(self.cfg.n_asteroids)
         if count <= 0:
             return []
+        if self.corridor_obstacles:
+            return self._corridor_rocks(count)
         radius = float(self.cfg.asteroid_radius)
         ship = self._state
         placed: list[tuple[float, float, float]] = []
@@ -217,8 +262,9 @@ class DockingEnv(gym.Env):
 
     def _raw_observation(self, state: ShipState) -> np.ndarray:
         if self.obs_mode == "pixels":
-            return render_rgb(state, self.cfg, self._pose, self._asteroids)
-        port_x, port_y = port_world_center(self.cfg, self._pose)
+            return render_rgb(state, self.cfg, self._pose, self._asteroids, ports=self._ports, active_port=self._active_port)
+        port = self._port()
+        port_x, port_y = port_world_center(self.cfg, self._pose, port)
         position_std = float(self.cfg.sensor_position_std)
         velocity_std = float(self.cfg.sensor_velocity_std)
         heading_std = float(self.cfg.sensor_heading_std)
@@ -227,7 +273,7 @@ class DockingEnv(gym.Env):
         sensed_vx = state.vx + (float(self.np_random.normal(0.0, velocity_std)) if velocity_std > 0.0 else 0.0)
         sensed_vy = state.vy + (float(self.np_random.normal(0.0, velocity_std)) if velocity_std > 0.0 else 0.0)
         sensed_theta = state.theta + (float(self.np_random.normal(0.0, heading_std)) if heading_std > 0.0 else 0.0)
-        heading_error = angle_diff(sensed_theta, approach_angle(self.cfg, self._pose))
+        heading_error = angle_diff(sensed_theta, approach_angle(self.cfg, self._pose, port))
         obs = [
             (sensed_x - port_x) / 10.0,
             (sensed_y - port_y) / 8.0,
@@ -240,7 +286,7 @@ class DockingEnv(gym.Env):
             state.fuel / max(self.cfg.fuel_capacity, 1e-6),
         ]
         if self.extended_obs:
-            port_vx, port_vy = port_velocity(self.cfg, self._pose)
+            port_vx, port_vy = port_velocity(self.cfg, self._pose, port)
             rock_x, rock_y, present = self._nearest_asteroid(state)
             obs.extend(
                 [
@@ -254,6 +300,8 @@ class DockingEnv(gym.Env):
                     present,
                 ]
             )
+        if self.cfg.second_port:
+            obs.append(self._phase_value())
         return np.clip(np.asarray(obs, dtype=np.float32), -OBS_CLIP, OBS_CLIP)
 
     def _observe(self, state: ShipState) -> np.ndarray:
@@ -277,12 +325,13 @@ class DockingEnv(gym.Env):
         return (rock_x - state.x) / 10.0, (rock_y - state.y) / 8.0, 1.0
 
     def _metrics(self, state: ShipState) -> dict[str, float]:
-        port_x, port_y = port_world_center(self.cfg, self._pose)
+        port = self._port()
+        port_x, port_y = port_world_center(self.cfg, self._pose, port)
         distance = float(np.hypot(state.x - port_x, state.y - port_y))
-        relative_vx, relative_vy = target_relative_velocity(state, self.cfg, self._pose)
+        relative_vx, relative_vy = target_relative_velocity(state, self.cfg, self._pose, port)
         absolute_speed = float(np.hypot(state.vx, state.vy))
-        speed = target_relative_speed(state, self.cfg, self._pose)
-        heading_error = abs(angle_diff(state.theta, approach_angle(self.cfg, self._pose)))
+        speed = target_relative_speed(state, self.cfg, self._pose, port)
+        heading_error = abs(angle_diff(state.theta, approach_angle(self.cfg, self._pose, port)))
         return {
             "distance": distance,
             "speed": speed,
@@ -295,7 +344,21 @@ class DockingEnv(gym.Env):
 
     def _scene(self) -> dict[str, Any]:
         hull_x, hull_y = station_center(self.cfg, self._pose)
-        port_x, port_y = port_world_center(self.cfg, self._pose)
+        ports = []
+        for index, spec in enumerate(self._ports):
+            port_x, port_y = port_world_center(self.cfg, self._pose, spec)
+            ports.append(
+                {
+                    "cx": float(port_x),
+                    "cy": float(port_y),
+                    "theta": float(self._pose.theta),
+                    "w": float(spec.w),
+                    "h": float(spec.h),
+                    "approach": float(approach_angle(self.cfg, self._pose, spec)),
+                    "active": index == self._active_port,
+                }
+            )
+        active = ports[min(self._active_port, len(ports) - 1)]
         return {
             "station": {
                 "cx": float(hull_x),
@@ -305,12 +368,19 @@ class DockingEnv(gym.Env):
                 "h": float(self.cfg.hull_h),
             },
             "port_pose": {
-                "cx": float(port_x),
-                "cy": float(port_y),
-                "theta": float(self._pose.theta),
-                "w": float(self.cfg.port_w),
-                "h": float(self.cfg.port_h),
+                "cx": active["cx"],
+                "cy": active["cy"],
+                "theta": active["theta"],
+                "w": active["w"],
+                "h": active["h"],
+                "approach": active["approach"],
+                "active": True,
             },
+            "ports": ports,
+            "phase": self._phase,
+            "active_port": int(self._active_port),
+            "hold": int(self._hold),
+            "hold_steps": int(self.cfg.hold_steps),
             "asteroids": [
                 {"x": float(x), "y": float(y), "r": float(radius)} for x, y, radius in self._asteroids
             ],
@@ -367,6 +437,11 @@ class DockingEnv(gym.Env):
             "theta": float(state.theta),
             "omega": float(state.omega),
             "reward_components": dict(self._last_components),
+            "phase": self._phase,
+            "active_port": int(self._active_port),
+            "hold": int(self._hold),
+            "hold_steps": int(self.cfg.hold_steps),
+            "dock_omega_max": float(self.cfg.dock_omega_max),
         }
 
     def reset(self, *, seed: int | None = None, options: dict[str, Any] | None = None) -> tuple[np.ndarray, dict[str, Any]]:
@@ -429,6 +504,9 @@ class DockingEnv(gym.Env):
         self._fuel_used_total = 0.0
         self._last_components = {}
         self._obs_history = []
+        self._active_port = 0
+        self._hold = 0
+        self._phase = "approach"
         self._prev_distance = self._metrics(self._state)["distance"]
         obs = self._observe(self._state)
         return obs, self._info(self._state)
@@ -476,7 +554,26 @@ class DockingEnv(gym.Env):
             self.cfg.ship_radius,
         )
         left_map = out_of_bounds(self._state, self.cfg)
-        success = docking_success(self._state, self.cfg, self._pose) and not hit_hull and not hit_rock and not left_map
+        reward_metrics = self._metrics(self._state)
+        captured = docking_success(self._state, self.cfg, self._pose, self._port()) and not hit_hull and not hit_rock and not left_map
+        berth = False
+        success = False
+        if self.cfg.second_port and self._active_port == 0:
+            if captured:
+                self._hold += 1
+                self._phase = "hold"
+                if self._hold >= int(self.cfg.hold_steps):
+                    self._active_port = 1
+                    self._hold = 0
+                    self._phase = "transfer"
+                    berth = True
+            else:
+                self._hold = 0
+                self._phase = "approach"
+        else:
+            success = captured
+            if self.cfg.second_port:
+                self._phase = "transfer"
         out_of_fuel = self.fail_on_empty_fuel and self._state.fuel <= 1e-8 and not success
         crash = bool(hit_hull or hit_rock or left_map or out_of_fuel)
         timeout = self._step_count >= self.max_steps and not success and not crash
@@ -499,14 +596,16 @@ class DockingEnv(gym.Env):
         metrics = self._metrics(self._state)
         self._fuel_used_total += fuel_used
         ctx = RewardContext(
-            distance=metrics["distance"],
+            distance=reward_metrics["distance"],
             prev_distance=self._prev_distance,
-            speed=metrics["speed"],
-            heading_error=metrics["heading_error"],
+            speed=reward_metrics["speed"],
+            heading_error=reward_metrics["heading_error"],
             fuel_used=fuel_used,
             success=success,
             crash=crash,
             timeout=timeout,
+            omega=float(self._state.omega),
+            berth=berth,
         )
         self._prev_distance = metrics["distance"]
         reward, components = self._reward_fn(ctx)
@@ -533,5 +632,12 @@ class DockingEnv(gym.Env):
 
     def render(self) -> np.ndarray | None:
         if self.render_mode == "rgb_array" or self.obs_mode == "pixels":
-            return render_rgb(self._state, self.cfg, self._pose, self._asteroids)
+            return render_rgb(
+                self._state,
+                self.cfg,
+                self._pose,
+                self._asteroids,
+                ports=self._ports,
+                active_port=self._active_port,
+            )
         return None

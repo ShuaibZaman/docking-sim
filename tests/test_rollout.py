@@ -2,7 +2,22 @@ import numpy as np
 
 from docking_sim.replay.benchmarks import get_benchmark, get_scenario
 from docking_sim.replay.controllers import list_baselines
-from docking_sim.replay.rollout import command_fields, policy_action_to_commands, rollout
+from docking_sim.replay.rollout import _normalize_obs, command_fields, policy_action_to_commands, rollout
+
+
+class _Float64Normalizer:
+    def normalize_obs(self, obs):
+        return np.asarray(obs, dtype=np.float64)
+
+
+def test_normalize_obs_returns_float32_for_pixels_and_state():
+    normalizer = _Float64Normalizer()
+    pixels = _normalize_obs(normalizer, np.zeros((4, 5, 3), dtype=np.uint8))
+    state = _normalize_obs(normalizer, np.zeros(9, dtype=np.float64))
+    assert pixels.dtype == np.float32
+    assert pixels.shape == (4, 5, 3)
+    assert state.dtype == np.float32
+    assert state.shape == (9,)
 
 
 def test_random_rollout_is_seed_deterministic():
@@ -17,7 +32,8 @@ def test_random_rollout_is_seed_deterministic():
 def test_rollout_exposes_dock_limits_and_crash_flags():
     data = rollout(checkpoint="random", seed=3, max_steps=25)
     world = data["world"]
-    assert world["dock_speed_max"] == 0.35
+    assert world["dock_speed_max"] == 0.08
+    assert world["dock_omega_max"] == 0.08
     assert abs(world["dock_angle_max_deg"] - 12.0) < 1e-6
     assert world["approach_angle"] > 0
     for frame in data["frames"]:

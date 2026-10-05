@@ -98,6 +98,40 @@ def test_moving_target_requires_relative_capture_speed():
     assert not docking_success(stationary, cfg, pose)
 
 
+def test_capture_requires_a_stop_and_no_spin():
+    cfg = WorldConfig()
+    stopped = ShipState(
+        x=cfg.port_cx,
+        y=cfg.port_cy,
+        vx=0.0,
+        vy=0.0,
+        theta=cfg.port_approach_angle,
+        omega=0.0,
+        fuel=100.0,
+    )
+    spinning = ShipState(
+        x=cfg.port_cx,
+        y=cfg.port_cy,
+        vx=0.0,
+        vy=0.0,
+        theta=cfg.port_approach_angle,
+        omega=0.4,
+        fuel=100.0,
+    )
+    fast = ShipState(
+        x=cfg.port_cx,
+        y=cfg.port_cy,
+        vx=0.2,
+        vy=0.0,
+        theta=cfg.port_approach_angle,
+        omega=0.0,
+        fuel=100.0,
+    )
+    assert docking_success(stopped, cfg)
+    assert not docking_success(spinning, cfg)
+    assert not docking_success(fast, cfg)
+
+
 def test_swept_collisions_catch_tunnelling_between_endpoints():
     cfg = WorldConfig()
     start = ShipState(x=-3.0, y=cfg.hull_cy, vx=0, vy=0, theta=0, omega=0, fuel=100)

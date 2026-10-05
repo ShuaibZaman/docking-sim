@@ -334,8 +334,8 @@ button:hover {
 }
 
 .explore-main {
-  overflow: auto;
-  padding: 18px;
+  overflow: hidden;
+  padding: 0;
 }
 
 .mode-tabs {
@@ -621,6 +621,67 @@ button:hover {
   max-width: 1120px;
 }
 
+.compact-explore {
+  height: 100%;
+  max-width: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.compact-explore .main {
+  min-height: 0;
+  flex: 1;
+}
+
+.compact-explore .sim-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.compact-explore .skeleton {
+  flex: 1;
+  min-height: 240px;
+}
+
+.canvas-footer {
+  position: static;
+  border-top: 1px solid #1e2633;
+  background: #0c1018;
+}
+
+.mission-stepper {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.mission-stepper strong {
+  display: block;
+  text-transform: capitalize;
+}
+
+.inspector {
+  display: grid;
+  gap: 8px;
+}
+
+.evidence-fold {
+  border: 1px solid #1e2633;
+  background: #0c1018;
+  padding: 8px 12px;
+}
+
+.evidence-fold summary {
+  cursor: pointer;
+  color: #3ee0c5;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-size: 11px;
+}
+
 .explore-scene {
   position: relative;
   min-height: 560px;
@@ -766,7 +827,8 @@ td.good {
 }
 
 .ops-side .candidate-editor {
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1.5fr) minmax(88px, 0.7fr) auto;
+  align-items: end;
 }
 
 .incompatible-fold {

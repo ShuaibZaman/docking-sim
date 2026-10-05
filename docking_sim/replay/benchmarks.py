@@ -9,7 +9,7 @@ from typing import Any
 
 import numpy as np
 
-from docking_sim.env.physics import ShipState, StationPose, WorldConfig
+from docking_sim.env.physics import ShipState, StationPose, WorldConfig, clamp_capture_omega, clamp_capture_speed
 
 
 BENCHMARK_PROTOCOL_VERSION = "1.0"
@@ -20,7 +20,8 @@ BENCHMARK_PROTOCOL_VERSION = "1.0"
 STATIC_BENCHMARK_ENV: dict[str, Any] = {
     "max_steps": 800,
     "dt": 0.05,
-    "dock_speed_max": 0.35,
+    "dock_speed_max": 0.08,
+    "dock_omega_max": 0.08,
     "dock_angle_max_deg": 12.0,
     "fuel_capacity": 100.0,
     "randomize_start": False,
@@ -302,7 +303,8 @@ def _world_fields(env_kwargs: dict[str, Any]) -> dict[str, Any]:
     }
     fields["dt"] = float(env_kwargs.get("dt", defaults.dt))
     fields["fuel_capacity"] = float(env_kwargs.get("fuel_capacity", defaults.fuel_capacity))
-    fields["dock_speed_max"] = float(env_kwargs.get("dock_speed_max", defaults.dock_speed_max))
+    fields["dock_speed_max"] = clamp_capture_speed(env_kwargs.get("dock_speed_max", defaults.dock_speed_max))
+    fields["dock_omega_max"] = clamp_capture_omega(env_kwargs.get("dock_omega_max", defaults.dock_omega_max))
     dock_angle_max_deg = float(env_kwargs.get("dock_angle_max_deg", 12.0))
     fields["dock_angle_max"] = float(np.deg2rad(dock_angle_max_deg))
     fields["dock_angle_max_deg"] = dock_angle_max_deg
@@ -330,9 +332,15 @@ def interface_contract(env_kwargs: dict[str, Any]) -> dict[str, Any]:
             or world["n_asteroids"]
         )
     obs_mode = str(env_kwargs.get("obs_mode", "state"))
+    if obs_mode == "pixels":
+        state_dim = None
+    else:
+        state_dim = 17 if extended else 9
+        if world.get("second_port"):
+            state_dim += 1
     return {
         "obs_mode": obs_mode,
-        "state_dim": 17 if obs_mode == "state" and extended else (9 if obs_mode == "state" else None),
+        "state_dim": state_dim,
         "image_shape": [128, 160, 3] if obs_mode == "pixels" else None,
         "action_shape": [3],
     }

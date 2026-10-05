@@ -24,6 +24,7 @@ export type RewardComponents = {
   distance?: number;
   velocity?: number;
   rotation?: number;
+  spin?: number;
   fuel?: number;
   time?: number;
   terminal?: number;
@@ -35,6 +36,8 @@ export type PoseBox = {
   theta: number;
   w: number;
   h: number;
+  approach?: number;
+  active?: boolean;
 };
 
 export type Asteroid = {
@@ -77,6 +80,11 @@ export type Frame = {
   relative_vy?: number;
   station?: PoseBox;
   port_pose?: PoseBox;
+  ports?: PoseBox[];
+  phase?: string;
+  active_port?: number;
+  hold?: number;
+  hold_steps?: number;
   asteroids?: Asteroid[];
 };
 
@@ -95,8 +103,15 @@ export type World = {
   hull: { cx: number; cy: number; w: number; h: number };
   port: { cx: number; cy: number; w: number; h: number };
   dock_speed_max: number;
+  dock_omega_max?: number;
   dock_angle_max_deg: number;
   approach_angle: number;
+};
+
+export type LevelChoice = {
+  id: number;
+  label: string;
+  summary: string;
 };
 
 export type Replay = {

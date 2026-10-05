@@ -16,6 +16,8 @@ class RewardContext:
     success: bool
     crash: bool
     timeout: bool
+    omega: float = 0.0
+    berth: bool = False
 
 
 def _empty_components() -> dict[str, float]:
@@ -25,6 +27,7 @@ def _empty_components() -> dict[str, float]:
         "rotation": 0.0,
         "fuel": 0.0,
         "time": 0.0,
+        "spin": 0.0,
         "safety": 0.0,
         "terminal": 0.0,
     }
@@ -42,10 +45,13 @@ def safe_docking(ctx: RewardContext, weights: dict[str, float]) -> tuple[float, 
     parts["distance"] += float(weights.get("gate", 2.0)) * proximity
     parts["velocity"] = -float(weights.get("velocity", 0.4)) * ctx.speed * near
     parts["rotation"] = -float(weights.get("rotation", 0.35)) * ctx.heading_error * near
+    parts["spin"] = -float(weights.get("spin", 0.35)) * abs(ctx.omega)
     parts["fuel"] = -float(weights.get("fuel", 0.02)) * ctx.fuel_used
     parts["time"] = -float(weights.get("time", 0.01))
+    if ctx.berth:
+        parts["terminal"] += float(weights.get("berth", 40.0))
     if ctx.success:
-        parts["terminal"] = float(weights.get("success", 120.0))
+        parts["terminal"] += float(weights.get("success", 120.0))
     elif ctx.crash:
         parts["terminal"] = -(
             float(weights.get("crash", 80.0)) + float(weights.get("crash_speed", 15.0)) * ctx.speed
@@ -77,11 +83,14 @@ def constrained_docking(ctx: RewardContext, weights: dict[str, float]) -> tuple[
     parts["distance"] = float(weights.get("distance", 1.0)) * (ctx.prev_distance - ctx.distance)
     parts["velocity"] = -float(weights.get("velocity", 0.4)) * ctx.speed * near
     parts["rotation"] = -float(weights.get("rotation", 0.35)) * ctx.heading_error * near
+    parts["spin"] = -float(weights.get("spin", 0.35)) * abs(ctx.omega)
     parts["fuel"] = -float(weights.get("fuel", 0.02)) * ctx.fuel_used
     parts["time"] = -float(weights.get("time", 0.01))
     parts["safety"] = -float(weights.get("safety_speed", 8.0)) * speed_excess * speed_excess
+    if ctx.berth:
+        parts["terminal"] += float(weights.get("berth", 40.0))
     if ctx.success:
-        parts["terminal"] = float(weights.get("success", 120.0))
+        parts["terminal"] += float(weights.get("success", 120.0))
     elif ctx.crash:
         parts["terminal"] = -(
             float(weights.get("crash", 80.0)) + float(weights.get("crash_speed", 15.0)) * ctx.speed
@@ -106,6 +115,8 @@ DEFAULT_WEIGHTS: dict[str, float] = {
     "crash_speed": 15.0,
     "gate": 2.0,
     "close_range": 4.0,
+    "spin": 0.35,
+    "berth": 40.0,
     "safety_speed_max": 0.5,
     "safety_speed": 8.0,
 }

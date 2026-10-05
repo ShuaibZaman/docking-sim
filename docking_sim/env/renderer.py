@@ -3,8 +3,10 @@ from __future__ import annotations
 import numpy as np
 
 from docking_sim.env.physics import (
+    PortSpec,
     StationPose,
     WorldConfig,
+    port_list,
     port_world_center,
     station_center,
     wrap_angle,
@@ -82,6 +84,8 @@ def render_rgb(
     asteroids: list[tuple[float, float, float]] | None = None,
     width: int = IMAGE_WIDTH,
     height: int = IMAGE_HEIGHT,
+    ports: tuple[PortSpec, ...] | None = None,
+    active_port: int = 0,
 ) -> np.ndarray:
     pose = pose or StationPose()
     img = np.zeros((height, width, 3), dtype=np.uint8)
@@ -95,8 +99,10 @@ def render_rgb(
     hull_x, hull_y = station_center(cfg, pose)
     _fill_rotated_rect(img, hull_x, hull_y, cfg.hull_w, cfg.hull_h, pose.theta, (72, 82, 104), cfg, width, height)
 
-    port_x, port_y = port_world_center(cfg, pose)
-    _fill_rotated_rect(img, port_x, port_y, cfg.port_w, cfg.port_h, pose.theta, (40, 170, 150), cfg, width, height)
+    for index, spec in enumerate(ports or port_list(cfg)):
+        port_x, port_y = port_world_center(cfg, pose, spec)
+        color = (40, 170, 150) if index == active_port else (24, 90, 84)
+        _fill_rotated_rect(img, port_x, port_y, spec.w, spec.h, pose.theta, color, cfg, width, height)
 
     sx, sy = _world_to_px(state.x, state.y, cfg, width, height)
     scale = width / (cfg.x_max - cfg.x_min)

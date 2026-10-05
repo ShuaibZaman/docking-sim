@@ -8,6 +8,7 @@ import {
   fetchBenchmarks,
   fetchCheckpoints,
   fetchEval,
+  fetchLevels,
   fetchPresets,
   fetchReplay,
   fetchRuns,
@@ -24,6 +25,7 @@ import type {
   EvalPoint,
   EvalSummary,
   Frame,
+  LevelChoice,
   PairwiseScenario,
   Replay,
   RunSummary,
@@ -211,43 +213,87 @@ function typingTarget(target: EventTarget | null): boolean {
   return tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA" || element.isContentEditable;
 }
 
-function CaptureGates({ frame, world }: { frame: Frame | undefined; world: World }) {
-  if (!frame) return null;
-  const close = frame.distance <= 2 || insidePort(frame, world);
+function captureReport(frame: Frame | undefined, world: World | undefined): { gates: Array<{ name: string; value: string; detail: string; state: GateState }>; sentence: string } {
+  if (!frame || !world) return { gates: [], sentence: "Waiting for a frame." };
+  const inPort = insidePort(frame, world);
   const headingDeg = (frame.heading_error * 180) / Math.PI;
-  const gates: Array<{ name: string; value: string; limit: string; state: GateState }> = [
+  const spinLimit = world.dock_omega_max ?? 0.08;
+  const gates = [
     {
-      name: "Range",
-      value: frame.distance.toFixed(2),
-      limit: "in port",
-      state: insidePort(frame, world) ? "met" : close ? "fail" : "neutral",
+      name: "In port",
+      value: inPort ? "yes" : frame.distance.toFixed(2),
+      detail: inPort ? "Inside the active port" : `${frame.distance.toFixed(2)} from the active port`,
+      state: (inPort ? "met" : "fail") as GateState,
     },
     {
       name: "Speed",
       value: frame.speed.toFixed(2),
-      limit: `≤ ${world.dock_speed_max}`,
-      state: !close ? "neutral" : frame.speed <= world.dock_speed_max ? "met" : "fail",
+      detail: `speed ${frame.speed.toFixed(2)}, limit ${world.dock_speed_max}`,
+      state: (frame.speed <= world.dock_speed_max ? "met" : "fail") as GateState,
     },
     {
       name: "Heading",
-      value: `${headingDeg.toFixed(1)}°`,
-      limit: `≤ ${world.dock_angle_max_deg.toFixed(0)}°`,
-      state: !close ? "neutral" : headingDeg <= world.dock_angle_max_deg ? "met" : "fail",
+      value: `${headingDeg.toFixed(0)}°`,
+      detail: `heading ${headingDeg.toFixed(1)}°, limit ${world.dock_angle_max_deg.toFixed(0)}°`,
+      state: (headingDeg <= world.dock_angle_max_deg ? "met" : "fail") as GateState,
     },
     {
-      name: "Fuel",
-      value: frame.fuel.toFixed(1),
-      limit: "> 1",
-      state: frame.fuel > 1 ? "met" : "fail",
+      name: "Spin",
+      value: Math.abs(frame.omega).toFixed(2),
+      detail: `spin ${Math.abs(frame.omega).toFixed(2)} rad/s, limit ${spinLimit}`,
+      state: (Math.abs(frame.omega) <= spinLimit ? "met" : "fail") as GateState,
     },
   ];
+  if (frame.success) return { gates, sentence: "Docked: stopped, facing the approach, and not spinning." };
+  if (frame.phase === "hold") {
+    const held = ((frame.hold ?? 0) * 0.05).toFixed(1);
+    const need = (((frame.hold_steps ?? 20) * 0.05) || 1).toFixed(1);
+    return { gates, sentence: `Holding at the first port (${held}s of ${need}s). Keep the stop.` };
+  }
+  if (frame.phase === "transfer" && !frame.done) {
+    return { gates, sentence: "First port is done. Fly to the other port, stop, and face its approach." };
+  }
+  if (frame.done && !frame.success) return { gates, sentence: `Ended: ${frame.terminal_reason || "no dock"}.` };
+  const failed = gates.filter((gate) => gate.state === "fail").map((gate) => gate.detail);
+  return { gates, sentence: failed.length ? `Not docked: ${failed.join("; ")}.` : "Capture conditions are met." };
+}
+
+function CaptureGates({ frame, world }: { frame: Frame | undefined; world: World }) {
+  const report = captureReport(frame, world);
+  if (!report.gates.length) return null;
   return (
     <div className="gates" aria-label="Capture gates">
-      {gates.map((gate) => (
-        <span className={`gate ${gate.state}`} key={gate.name} title={gate.limit}>
+      {report.gates.map((gate) => (
+        <span className={`gate ${gate.state}`} key={gate.name} title={gate.detail}>
           <em>{gate.name}</em>
           {gate.value}
         </span>
+      ))}
+    </div>
+  );
+}
+
+function RewardBars({ frame }: { frame: Frame | undefined }) {
+  const items = [
+    ["Distance", frame?.components.distance ?? 0],
+    ["Velocity", frame?.components.velocity ?? 0],
+    ["Rotation", frame?.components.rotation ?? 0],
+    ["Spin", frame?.components.spin ?? 0],
+    ["Fuel", frame?.components.fuel ?? 0],
+    ["Time", frame?.components.time ?? 0],
+    ["Docking", frame?.components.terminal ?? 0],
+  ] as const;
+  const maxAbs = Math.max(1, ...items.map(([, value]) => Math.abs(value)));
+  return (
+    <div className="bars">
+      {items.map(([label, value]) => (
+        <div className="bar-row" key={label}>
+          <span>{label}</span>
+          <div className="bar-track">
+            <div className={`bar-fill ${value >= 0 ? "pos" : "neg"}`} style={{ width: `${(Math.abs(value) / maxAbs) * 100}%` }} />
+          </div>
+          <span>{value.toFixed(2)}</span>
+        </div>
       ))}
     </div>
   );
@@ -441,8 +487,6 @@ function CandidateReplayCard({
       <div className="candidate-canvas">
         <SimCanvas world={replay.world} frames={frames} index={index} selection={selection} onSelect={setSelection} />
       </div>
-      <CaptureGates frame={frame} world={replay.world} />
-      <TelemetryGroups frame={frame} frames={frames} />
     </article>
   );
 }
@@ -505,6 +549,8 @@ function Explorer({ runs, active }: { runs: RunSummary[]; active: boolean }) {
   const [runId, setRunId] = useState("");
   const [checkpoint, setCheckpoint] = useState("random");
   const [checkpoints, setCheckpoints] = useState<Checkpoint[]>([RANDOM_CHECKPOINT]);
+  const [levels, setLevels] = useState<LevelChoice[]>([]);
+  const [level, setLevel] = useState(1);
   const [seed, setSeed] = useState(42);
   const [replay, setReplay] = useState<Replay | null>(null);
   const [index, setIndex] = useState(0);
@@ -514,8 +560,16 @@ function Explorer({ runs, active }: { runs: RunSummary[]; active: boolean }) {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
+  const seededRun = useRef(false);
+
   useEffect(() => {
-    if (!runId && runs[0]) setRunId(runs[0].id);
+    fetchLevels().then(setLevels).catch(() => setLevels([]));
+  }, []);
+
+  useEffect(() => {
+    if (seededRun.current || runId || !runs[0]) return;
+    seededRun.current = true;
+    setRunId(runs[0].id);
   }, [runId, runs]);
 
   useEffect(() => {
@@ -538,7 +592,7 @@ function Explorer({ runs, active }: { runs: RunSummary[]; active: boolean }) {
     setIndex(0);
     setSelection(null);
     setLoading(true);
-    fetchReplay({ run_id: runId || null, checkpoint, seed })
+    fetchReplay({ run_id: runId || null, checkpoint, seed, level })
       .then((next) => {
         if (!cancelled) {
           setReplay(next);
@@ -554,7 +608,7 @@ function Explorer({ runs, active }: { runs: RunSummary[]; active: boolean }) {
     return () => {
       cancelled = true;
     };
-  }, [runId, checkpoint, seed]);
+  }, [runId, checkpoint, seed, level]);
 
   const frames = replay?.frames ?? [];
   useEffect(() => {
@@ -595,17 +649,13 @@ function Explorer({ runs, active }: { runs: RunSummary[]; active: boolean }) {
   const current = frames[index];
   const state = outcome(current);
   const elapsed = replay ? index * replay.dt : 0;
+  const report = captureReport(current, replay?.world);
+  const selectedRun = runs.find((run) => run.id === runId);
+  const meta = replay?.meta;
+  const levelSummary = levels.find((item) => item.id === level)?.summary;
   return (
-    <section className="explore-shell">
-      <div className="status-strip" aria-label="Explore status">
-        <span>Explore</span>
-        <span>custom seed {seed}</span>
-        <span>{playing ? "playing" : "paused"}</span>
-        <span>{elapsed.toFixed(1)}s</span>
-        <strong className={state.tone}>{state.label}</strong>
-        <span className="status-note">Not benchmark evidence</span>
-      </div>
-      <div className="explore-toolbar">
+    <section className="explore-shell compact-explore">
+      <div className="header-controls explore-toolbar">
         <label>
           Run
           <select value={runId} onChange={(event) => setRunId(event.target.value)}>
@@ -628,53 +678,80 @@ function Explorer({ runs, active }: { runs: RunSummary[]; active: boolean }) {
           </select>
         </label>
         <label>
-          Custom seed
-          <input type="number" value={seed} onChange={(event) => setSeed(Number(event.target.value))} />
-        </label>
-      </div>
-      <div className="explore-scene">
-        {loading || !replay ? (
-          <div className="skeleton" />
-        ) : (
-          <SimCanvas world={replay.world} frames={frames} index={index} selection={selection} onSelect={setSelection} />
-        )}
-        <span className={`outcome ${state.tone}`}>{state.label}</span>
-      </div>
-      {replay && current ? <CaptureGates frame={current} world={replay.world} /> : null}
-      {replay ? <TelemetryGroups frame={current} frames={frames} /> : null}
-      <div className="explore-footer">
-        <button onClick={() => setPlaying((value) => !value)} type="button">
-          {playing ? "Pause" : "Play"}
-        </button>
-        <label>
-          Speed
-          <select value={speed} onChange={(event) => setSpeed(Number(event.target.value) as (typeof SPEEDS)[number])}>
-            {SPEEDS.map((value) => (
-              <option key={value} value={value}>
-                {value}x
+          Level
+          <select value={level} onChange={(event) => setLevel(Number(event.target.value))}>
+            {levels.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.id}. {item.label}
               </option>
             ))}
           </select>
         </label>
-        <input
-          className="slider"
-          type="range"
-          min={0}
-          max={Math.max(0, frames.length - 1)}
-          value={index}
-          onChange={(event) => {
-            setPlaying(false);
-            setIndex(Number(event.target.value));
-          }}
-        />
-        <span>
-          {index}/{Math.max(0, frames.length - 1)}
-        </span>
+        <label>
+          Seed
+          <input type="number" value={seed} onChange={(event) => setSeed(Number(event.target.value))} />
+        </label>
       </div>
-      <p className="note">
-        This is an exploration replay. A custom seed is not a persisted shared mission, so it is kept off the leaderboard.
-      </p>
-      {error ? <p className="error">{error}</p> : null}
+      <div className="main">
+        <section className="sim-pane">
+          {loading || !replay ? (
+            <div className="skeleton" />
+          ) : (
+            <SimCanvas world={replay.world} frames={frames} index={index} selection={selection} onSelect={setSelection} />
+          )}
+          <span className={`outcome ${state.tone}`}>{state.label}</span>
+          <div className="explore-footer canvas-footer">
+            <button onClick={() => setPlaying((value) => !value)} type="button">
+              {playing ? "Pause" : "Play"}
+            </button>
+            <label>
+              Speed
+              <select value={speed} onChange={(event) => setSpeed(Number(event.target.value) as (typeof SPEEDS)[number])}>
+                {SPEEDS.map((value) => (
+                  <option key={value} value={value}>
+                    {value}x
+                  </option>
+                ))}
+              </select>
+            </label>
+            <input
+              className="slider"
+              type="range"
+              min={0}
+              max={Math.max(0, frames.length - 1)}
+              value={index}
+              onChange={(event) => {
+                setPlaying(false);
+                setIndex(Number(event.target.value));
+              }}
+            />
+            <span>
+              {elapsed.toFixed(1)}s · {index}/{Math.max(0, frames.length - 1)}
+            </span>
+          </div>
+        </section>
+        <aside className="side">
+          <h2>Model</h2>
+          <div className="meta-grid">
+            <div className="meta"><span className="k">Algorithm</span><span className="v">{meta?.algorithm ?? selectedRun?.algorithm ?? "Random"}</span></div>
+            <div className="meta"><span className="k">Architecture</span><span className="v">{meta?.architecture ?? "—"}</span></div>
+            <div className="meta"><span className="k">Parameters</span><span className="v">{meta?.n_params ?? selectedRun?.n_params ?? "—"}</span></div>
+            <div className="meta"><span className="k">Optimizer</span><span className="v">{meta?.optimizer ?? "—"}</span></div>
+            <div className="meta"><span className="k">Critic loss</span><span className="v">{meta?.critic_loss ?? "—"}</span></div>
+            <div className="meta"><span className="k">Seed</span><span className="v">{selectedRun?.seed ?? seed}</span></div>
+            <div className="meta"><span className="k">Observation</span><span className="v">{meta?.obs_mode ?? selectedRun?.obs_mode ?? "state"}</span></div>
+            <div className="meta"><span className="k">Level</span><span className="v">{level}</span></div>
+          </div>
+          <h2>Why</h2>
+          <p className="note">{report.sentence}</p>
+          {levelSummary ? <p className="note">{levelSummary}</p> : null}
+          {replay && current ? <CaptureGates frame={current} world={replay.world} /> : null}
+          <h2>Reward</h2>
+          <RewardBars frame={current} />
+          <p className="note">Explore is a custom seed or a level preview. It is not benchmark evidence.</p>
+          {error ? <p className="error">{error}</p> : null}
+        </aside>
+      </div>
     </section>
   );
 }
@@ -965,6 +1042,10 @@ function BenchmarkWorkspace({ mode, active }: { mode: LabMode; active: boolean }
       .sort((left, right) => left.x - right.x),
   }));
   const pinLabel = pin === "pd" ? "PD rendezvous" : pin === "random" ? "Random policy" : "";
+  const shownIndex = panels.length ? Math.min(highlight, panels.length - 1) : 0;
+  const shownPanel = panels[shownIndex];
+  const shownFrame = shownPanel ? frameAt(shownPanel, elapsedSeconds) : undefined;
+  const shownReport = captureReport(shownFrame, shownPanel?.replay.world);
 
   const side = (
     <aside className="ops-side">
@@ -1004,48 +1085,58 @@ function BenchmarkWorkspace({ mode, active }: { mode: LabMode; active: boolean }
                 </button>
               ))}
           </div>
-          <div className="section-heading">
+          <div className="mission-stepper">
+            <button disabled={missionPosition <= 0} onClick={() => openScenario(scenarios[missionPosition - 1].id)} type="button">
+              Previous
+            </button>
             <div>
               <span className="eyebrow">Mission {scenarios.length ? missionPosition + 1 : 0} of {scenarios.length}</span>
-              <h3>{selectedScenario ? selectedScenario.stratum.replace(/_/g, " ") : "Choose a mission"}</h3>
+              <strong>{selectedScenario ? selectedScenario.stratum.replace(/_/g, " ") : "Choose a mission"}</strong>
             </div>
+            <button
+              disabled={missionPosition < 0 || missionPosition >= scenarios.length - 1}
+              onClick={() => openScenario(scenarios[missionPosition + 1].id)}
+              type="button"
+            >
+              Next
+            </button>
           </div>
-          <label>
-            Stratum
-            <select value={stratumFilter} onChange={(event) => setStratumFilter(event.target.value)}>
-              <option value="all">All strata</option>
-              {(manifest?.strata ?? []).map((stratum) => (
-                <option key={stratum} value={stratum}>
-                  {stratum.replace(/_/g, " ")}
-                </option>
-              ))}
-            </select>
-          </label>
-          {primaryRun && primaryPoint && primaryPoint.checkpoint !== primaryCheckpoint ? (
-            <p className="note">Mission marks use the latest stored checkpoint, {primaryPoint.checkpoint}.</p>
-          ) : null}
-          {trainedSelections[0] && !pointFor(evals[trainedSelections[0].run_id ?? ""], trainedSelections[0].checkpoint) ? (
-            <p className="note">No stored benchmark evaluation for the selected run.</p>
-          ) : null}
-          <div className="mission-list" aria-label="Benchmark missions">
-            {visibleScenarios.map((scenario) => {
-              const stored = primaryOutcomes.get(scenario.id);
-              return (
-                <button
-                  className={scenario.id === scenarioId ? "mission-row active" : "mission-row"}
-                  key={scenario.id}
-                  onClick={() => openScenario(scenario.id)}
-                  type="button"
-                >
-                  <span>{scenario.id.replace("static-v1-", "#")}</span>
-                  <span>{scenario.stratum.replace(/_/g, " ")}</span>
-                  <em className={stored?.success ? "good" : stored ? "bad" : ""}>
-                    {stored ? (stored.success ? "docked" : stored.terminal_reason || "miss") : "—"}
-                  </em>
-                </button>
-              );
-            })}
-          </div>
+          <details className="incompatible-fold">
+            <summary>All missions</summary>
+            <label>
+              Stratum
+              <select value={stratumFilter} onChange={(event) => setStratumFilter(event.target.value)}>
+                <option value="all">All strata</option>
+                {(manifest?.strata ?? []).map((stratum) => (
+                  <option key={stratum} value={stratum}>
+                    {stratum.replace(/_/g, " ")}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {trainedSelections[0] && !pointFor(evals[trainedSelections[0].run_id ?? ""], trainedSelections[0].checkpoint) ? (
+              <p className="note">No stored benchmark evaluation for the selected run.</p>
+            ) : null}
+            <div className="mission-list" aria-label="Benchmark missions">
+              {visibleScenarios.map((scenario) => {
+                const stored = primaryOutcomes.get(scenario.id);
+                return (
+                  <button
+                    className={scenario.id === scenarioId ? "mission-row active" : "mission-row"}
+                    key={scenario.id}
+                    onClick={() => openScenario(scenario.id)}
+                    type="button"
+                  >
+                    <span>{scenario.id.replace("static-v1-", "#")}</span>
+                    <span>{scenario.stratum.replace(/_/g, " ")}</span>
+                    <em className={stored?.success ? "good" : stored ? "bad" : ""}>
+                      {stored ? (stored.success ? "docked" : stored.terminal_reason || "miss") : "—"}
+                    </em>
+                  </button>
+                );
+              })}
+            </div>
+          </details>
           <div className="section-heading">
             <h3>Candidates</h3>
             <button
@@ -1150,7 +1241,7 @@ function BenchmarkWorkspace({ mode, active }: { mode: LabMode; active: boolean }
           {panels.map((panel, index) => (
             <CandidateReplayCard
               elapsedSeconds={elapsedSeconds}
-              focused={highlight === index}
+              focused={shownIndex === index}
               key={`${panel.label}-${panel.candidate.checkpoint}-${index}`}
               panel={panel}
               checkpoint={checkpointText(panel.candidate)}
@@ -1161,6 +1252,15 @@ function BenchmarkWorkspace({ mode, active }: { mode: LabMode; active: boolean }
       ) : (
         <p className="empty viewport-empty">Run an exact mission to fill the viewports. Space plays, arrows scrub, and 1–4 highlight a panel.</p>
       )}
+      {shownPanel && shownFrame ? (
+        <section className="inspector">
+          <p className="note">{shownReport.sentence}</p>
+          <CaptureGates frame={shownFrame} world={shownPanel.replay.world} />
+          <TelemetryGroups frame={shownFrame} frames={shownPanel.replay.frames} />
+        </section>
+      ) : null}
+      <details className="evidence-fold">
+        <summary>Evidence</summary>
       <section className="evidence">
         {pinLabel ? (
           <p className="note">
@@ -1216,6 +1316,7 @@ function BenchmarkWorkspace({ mode, active }: { mode: LabMode; active: boolean }
           </section>
         </div>
       </section>
+      </details>
       </div>
     </div>
   );
@@ -1298,7 +1399,7 @@ function BenchmarkWorkspace({ mode, active }: { mode: LabMode; active: boolean }
           <>
             <span>{playing ? "playing" : "paused"}</span>
             <span>{elapsedSeconds.toFixed(1)}s</span>
-            <strong>{liveSummary}</strong>
+            <strong>{shownPanel ? shownReport.sentence : liveSummary}</strong>
           </>
         ) : (
           <strong>stored scores</strong>

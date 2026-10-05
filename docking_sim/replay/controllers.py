@@ -43,8 +43,9 @@ def pd_controller_action(env) -> np.ndarray:
     """
 
     state = env._state
-    port_x, port_y = port_world_center(env.cfg, env._pose)
-    port_vx, port_vy = port_velocity(env.cfg, env._pose)
+    port = env._port()
+    port_x, port_y = port_world_center(env.cfg, env._pose, port)
+    port_vx, port_vy = port_velocity(env.cfg, env._pose, port)
     dx = port_x - state.x
     dy = port_y - state.y
     distance = float(np.hypot(dx, dy))
@@ -52,16 +53,18 @@ def pd_controller_action(env) -> np.ndarray:
     desired_speed = min(1.4, 0.18 + 0.32 * distance)
     if distance < 2.0:
         desired_speed = min(desired_speed, 0.32)
+    if distance < 1.2:
+        desired_speed = min(desired_speed, 0.04)
     desired_vx = port_vx + direction_x * desired_speed
     desired_vy = port_vy + direction_y * desired_speed
     ax = 0.75 * dx + 1.35 * (desired_vx - state.vx)
     ay = 0.75 * dy + 1.35 * (desired_vy - state.vy)
 
     if distance < 2.8:
-        target_heading = approach_angle(env.cfg, env._pose)
+        target_heading = approach_angle(env.cfg, env._pose, port)
     else:
         target_heading = float(np.arctan2(dy, dx))
-    yaw = 1.8 * angle_diff(target_heading, state.theta) - 0.25 * state.omega
+    yaw = 2.2 * angle_diff(target_heading, state.theta) - 1.1 * state.omega
     return _body_commands(env, ax, ay, yaw)
 
 

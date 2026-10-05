@@ -39,6 +39,17 @@ function stationPose(frame: Frame | undefined, world: World): PoseBox {
   );
 }
 
+function listedPorts(frame: Frame | undefined, world: World): PoseBox[] {
+  if (frame?.ports && frame.ports.length) return frame.ports;
+  const pose = portPose(frame, world);
+  return [{ ...pose, active: true, approach: world.approach_angle + pose.theta }];
+}
+
+function activePort(frame: Frame | undefined, world: World): PoseBox {
+  const ports = listedPorts(frame, world);
+  return ports.find((port) => port.active) ?? ports[0];
+}
+
 function portPose(frame: Frame | undefined, world: World): PoseBox {
   return (
     frame?.port_pose ?? {
@@ -100,7 +111,7 @@ export function hitTest(
     return { kind: "ship" };
   }
   const cursor = worldFromPixel(px, py, world, width, height);
-  if (pointInPose(cursor.x, cursor.y, portPose(frame, world))) {
+  if (listedPorts(frame, world).some((port) => pointInPose(cursor.x, cursor.y, port))) {
     return { kind: "port" };
   }
   if (pointInPose(cursor.x, cursor.y, stationPose(frame, world))) {
@@ -213,8 +224,8 @@ function drawApproachOverlays(
   height: number,
 ) {
   const hull = stationPose(frame, world);
-  const dock = portPose(frame, world);
-  const approach = world.approach_angle + dock.theta;
+  const dock = activePort(frame, world);
+  const approach = dock.approach ?? world.approach_angle + dock.theta;
   const dirX = Math.cos(approach);
   const dirY = Math.sin(approach);
   const length = 6;
@@ -282,7 +293,7 @@ function drawRelativeInset(
   ctx.fillText("Target frame", left + 8, top + 6);
 
   const hull = stationPose(frame, world);
-  const dock = portPose(frame, world);
+  const dock = activePort(frame, world);
   const toLocal = (x: number, y: number) => {
     const dx = x - hull.cx;
     const dy = y - hull.cy;
@@ -439,7 +450,8 @@ export function SimCanvas({ world, frames, index, ghosts, selection, onSelect }:
 
       const shown = frames[index];
       const hullPose = stationPose(shown, world);
-      const dockPose = portPose(shown, world);
+      const ports = listedPorts(shown, world);
+      const dockPose = activePort(shown, world);
       (shown?.asteroids ?? []).forEach((rock) => {
         ctx.beginPath();
         ctx.arc(
@@ -468,23 +480,26 @@ export function SimCanvas({ world, frames, index, ghosts, selection, onSelect }:
       }
 
       const portSelected = selection?.kind === "port";
-      drawPose(
-        ctx,
-        dockPose,
-        world,
-        width,
-        height,
-        "rgba(62, 224, 197, 0.18)",
-        portSelected ? "#f3f1ea" : "#3ee0c5",
-        portSelected ? 2.5 : 1.5,
-      );
-      const speedLimit = world.dock_speed_max ?? 0.35;
+      ports.forEach((port) => {
+        const live = Boolean(port.active);
+        drawPose(
+          ctx,
+          port,
+          world,
+          width,
+          height,
+          live ? "rgba(62, 224, 197, 0.22)" : "rgba(62, 224, 197, 0.06)",
+          live ? (portSelected ? "#f3f1ea" : "#3ee0c5") : "rgba(62, 224, 197, 0.45)",
+          live ? (portSelected ? 2.5 : 1.5) : 1,
+        );
+      });
+      const speedLimit = world.dock_speed_max ?? 0.08;
       const angleLimit = world.dock_angle_max_deg ?? 12;
       const portLabelX = wx(dockPose.cx, world, width);
       const portLabelY = wy(dockPose.cy, world, height);
       ctx.fillStyle = "#3ee0c5";
       ctx.font = "600 11px 'IBM Plex Sans', sans-serif";
-      ctx.fillText("PORT", portLabelX, portLabelY + 22);
+      ctx.fillText(ports.length > 1 ? "TARGET" : "PORT", portLabelX, portLabelY + 22);
       ctx.font = "10px 'IBM Plex Sans', sans-serif";
       ctx.fillStyle = "#8b93a3";
       ctx.fillText(

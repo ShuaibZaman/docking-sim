@@ -7,6 +7,7 @@ import type {
   Checkpoint,
   EvalSummary,
   Metrics,
+  LevelChoice,
   Replay,
   RunSummary,
   ShowcasePreset,
@@ -44,10 +45,15 @@ export function fetchMetrics(runId: string): Promise<Metrics> {
   return request(`/api/runs/${encodeURIComponent(runId)}/metrics`);
 }
 
+export function fetchLevels(): Promise<LevelChoice[]> {
+  return request("/api/levels");
+}
+
 export function fetchReplay(body: {
   run_id?: string | null;
   checkpoint: string;
   seed: number;
+  level?: number | null;
 }): Promise<Replay> {
   return request("/api/replay", {
     method: "POST",

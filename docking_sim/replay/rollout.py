@@ -137,7 +137,7 @@ def _normalize_obs(vec: VecNormalize, obs: np.ndarray) -> np.ndarray:
     if array.ndim >= 3:
         batched = array[None, ...]
         normed = vec.normalize_obs(batched)
-        return np.asarray(normed)[0]
+        return np.asarray(normed, dtype=np.float32)[0]
     batched = array.reshape(1, -1)
     normed = vec.normalize_obs(batched)
     return np.asarray(normed, dtype=np.float32).reshape(-1)
@@ -164,6 +164,7 @@ def rollout(
     scenario=None,
     env_kwargs_override: dict[str, Any] | None = None,
     baseline: str | None = None,
+    level: int | None = None,
     model=None,
     vecnorm: VecNormalize | None = None,
 ) -> dict[str, Any]:
@@ -176,6 +177,10 @@ def rollout(
         candidate_env_kwargs = env_kwargs_from_config(cfg)
         meta = load_run_meta(run_dir)
     env_kwargs = dict(env_kwargs_override or candidate_env_kwargs)
+    if level is not None:
+        from docking_sim.env.levels import level_env_kwargs
+
+        env_kwargs = dict(level_env_kwargs(int(level)))
     if scenario is None and randomize_start is not None:
         env_kwargs["randomize_start"] = bool(randomize_start)
 
@@ -206,6 +211,7 @@ def rollout(
             "h": env.cfg.port_h,
         },
         "dock_speed_max": float(env.cfg.dock_speed_max),
+        "dock_omega_max": float(env.cfg.dock_omega_max),
         "dock_angle_max_deg": float(np.rad2deg(env.cfg.dock_angle_max)),
         "approach_angle": float(env.cfg.port_approach_angle),
         "scenario_id": info.get("scenario_id"),
@@ -222,6 +228,13 @@ def rollout(
             raise FileNotFoundError(f"checkpoint not found: {zip_path}")
         algo_name = str((cfg.get("algo") or {}).get("name") or meta.get("algorithm") or "ppo")
         model = load_policy(zip_path, algo_name)
+        expected = tuple(int(size) for size in model.observation_space.shape)
+        actual = tuple(int(size) for size in env.observation_space.shape)
+        if expected != actual:
+            env.close()
+            raise ValueError(
+                f"Checkpoint observation {expected} does not match this level's observation {actual}."
+            )
         vn_path = _vecnormalize_for_checkpoint(run_dir, checkpoint)
         if vn_path is not None:
             dummy = DummyVecEnv([lambda: DockingEnv(**env_kwargs)])
@@ -269,6 +282,11 @@ def rollout(
             "terminal_reason": str(inf.get("terminal_reason", "")),
             "station": inf.get("station"),
             "port_pose": inf.get("port_pose"),
+            "ports": inf.get("ports") or [],
+            "phase": inf.get("phase") or "approach",
+            "active_port": int(inf.get("active_port") or 0),
+            "hold": int(inf.get("hold") or 0),
+            "hold_steps": int(inf.get("hold_steps") or 0),
             "asteroids": inf.get("asteroids") or [],
         }
 

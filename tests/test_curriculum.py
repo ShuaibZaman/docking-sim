@@ -118,6 +118,9 @@ def test_level_configs_change_one_difficulty():
         "configs/ppo_level6_fuel.yaml": {"fuel": 30.0, "fail_on_empty_fuel": True, "level": 6},
         "configs/ppo_level7_asteroids.yaml": {"n_asteroids": 5, "extended": True, "level": 7},
         "configs/ppo_level8_moving.yaml": {"station_vx": 0.35, "extended": True, "level": 8},
+        "configs/ppo_level9_long.yaml": {"start_y": -7.2, "level": 9},
+        "configs/ppo_level10_corridor.yaml": {"n_asteroids": 3, "corridor": True, "extended": True, "level": 10},
+        "configs/ppo_level11_transfer.yaml": {"second_port": True, "level": 11},
         "configs/ppo_cnn_pixels.yaml": {"pixels": True, "level": 1},
     }
     for path, expect in expected.items():
@@ -142,9 +145,41 @@ def test_level_configs_change_one_difficulty():
             assert len(env._asteroids) == expect["n_asteroids"]
         if "station_vx" in expect:
             assert env.cfg.station_vx == expect["station_vx"]
+        if "start_y" in expect:
+            assert env._state.y == expect["start_y"]
+        if expect.get("corridor"):
+            assert env.corridor_obstacles is True
+        if expect.get("second_port"):
+            assert env.cfg.second_port is True
+            assert obs.shape == (10,)
         if expect.get("extended"):
             assert obs.shape == (EXTENDED_OBS_DIM,)
         if expect.get("pixels"):
             assert obs.shape == (128, 160, 3)
             assert env.obs_mode == "pixels"
         env.close()
+
+
+def test_two_port_hold_switches_target_without_ending():
+    env = DockingEnv(**env_kwargs_from_config(load_yaml("configs/ppo_level11_transfer.yaml")))
+    env.reset(seed=0)
+    env._state = ShipState(
+        x=env.cfg.port_cx,
+        y=env.cfg.port_cy,
+        vx=0.0,
+        vy=0.0,
+        theta=env.cfg.port_approach_angle,
+        omega=0.0,
+        fuel=env.cfg.fuel_capacity,
+    )
+    info = {}
+    for _ in range(int(env.cfg.hold_steps)):
+        _, _, terminated, truncated, info = env.step(np.zeros(3, dtype=np.float32))
+        assert not terminated
+        assert not truncated
+    assert info["phase"] == "transfer"
+    assert info["active_port"] == 1
+    assert info["ports"][1]["active"] is True
+    assert info["success"] is False
+    assert abs(info["port_pose"]["cy"] - env.cfg.port2_cy) < 1e-6
+    env.close()

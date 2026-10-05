@@ -17,6 +17,7 @@ from docking_sim.replay.benchmarks import (
     list_benchmarks,
     list_presets,
 )
+from docking_sim.env.levels import list_levels
 from docking_sim.replay.controllers import list_baselines
 from docking_sim.replay.eval import latest_outcomes, paired_summary, read_eval_rows, summarize_rows
 from docking_sim.replay.exports import export_bundle
@@ -27,6 +28,7 @@ class ReplayRequest(BaseModel):
     run_id: str | None = None
     checkpoint: str = "random"
     seed: int = 42
+    level: int | None = Field(default=None, ge=1, le=11)
     max_steps: int | None = Field(default=None, ge=1, le=5000)
 
 
@@ -126,6 +128,11 @@ def _assert_candidate_compatible(candidate: CandidateRequest, benchmark_id: str)
             detail=f"checkpoint not found for candidate: {candidate.checkpoint}",
         )
     return run_dir
+
+
+@app.get("/api/levels")
+def get_levels() -> list[dict[str, Any]]:
+    return list_levels()
 
 
 @app.get("/api/health")
@@ -252,9 +259,12 @@ def post_replay(body: ReplayRequest) -> dict[str, Any]:
             checkpoint=body.checkpoint,
             seed=body.seed,
             max_steps=body.max_steps,
+            level=body.level,
         )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.post("/api/benchmarks/{benchmark_id}/replay")
